@@ -1,0 +1,73 @@
+{
+    "name": "p3x-architect",
+    "version": "2026.4.102",
+    "corifeus": {
+        "icon": "fas fa-drafting-compass",
+        "icon-utf8": "📐",
+        "prefix": "p3x-",
+        "publish": true,
+        "type": "p3x",
+        "code": "Forge",
+        "nodejs": "v24.15.0",
+        "opencollective": false,
+        "reponame": "architect",
+        "build": true
+    },
+    "description": "📐 Multi-agent RUP pipeline — OpenAI + Claude take a requirement through Inception → Elaboration → Construction → Transition and emit a complete design + implementation under agents/slug/",
+    "type": "module",
+    "main": "src/index.mjs",
+    "exports": {
+        ".": "./src/index.mjs",
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "src/",
+        "bin/",
+        "LICENSE",
+        "README.md"
+    ],
+    "bin": {
+        "p3x-architect": "bin/architect.js",
+        "architect": "bin/architect.js",
+        "p3x-architect-mcp": "bin/architect-mcp.js"
+    },
+    "scripts": {
+        "test": "grunt"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/patrikx3/architect.git"
+    },
+    "keywords": [
+        "ai",
+        "architect",
+        "multi-agent",
+        "openai",
+        "claude",
+        "anthropic",
+        "code-generation",
+        "rup",
+        "scaffolding",
+        "p3x"
+    ],
+    "author": "Patrik Laszlo <alabard@gmail.com>",
+    "license": "MIT",
+    "bugs": {
+        "url": "https://github.com/patrikx3/architect/issues"
+    },
+    "homepage": "https://corifeus.com/architect",
+    "dependencies": {
+        "@anthropic-ai/sdk": "^0.91.1",
+        "@modelcontextprotocol/sdk": "^1.29.0",
+        "commander": "^14.0.3",
+        "fs-extra": "^11.3.4",
+        "openai": "^6.35.0",
+        "zod": "^4.3.6"
+    },
+    "devDependencies": {
+        "corifeus-builder": "^2026.4.157"
+    },
+    "engines": {
+        "node": ">=12.13.0"
+    }
+}

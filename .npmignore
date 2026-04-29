@@ -1,0 +1,9 @@
+secure/
+agents/
+.claude/
+.vscode/
+.codex/
+example/
+output/
+CLAUDE.md
+AGENTS.md
