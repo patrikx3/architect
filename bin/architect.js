@@ -1,45 +1,12 @@
 #!/usr/bin/env node
 
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 import { Command } from 'commander';
 import fsExtra from 'fs-extra';
 import { architect } from '../src/orchestrator.mjs';
 
 const { pathExists, readFile } = fsExtra;
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(__dirname, '..');
-
-async function loadEnvFile(envPath) {
-    if (!(await pathExists(envPath))) return false;
-    const content = await readFile(envPath, 'utf8');
-    for (const raw of content.split('\n')) {
-        const line = raw.trim();
-        if (!line || line.startsWith('#')) continue;
-        const eq = line.indexOf('=');
-        if (eq === -1) continue;
-        const key = line.slice(0, eq).trim();
-        let value = line.slice(eq + 1).trim();
-        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-            value = value.slice(1, -1);
-        }
-        if (!process.env[key]) process.env[key] = value;
-    }
-    return true;
-}
-
-async function loadEnv() {
-    const candidates = [
-        path.join(projectRoot, 'secure', '.env'),
-        path.join(projectRoot, 'secure', '.env.architect'),
-    ];
-    for (const c of candidates) {
-        if (await loadEnvFile(c)) return c;
-    }
-    return null;
-}
 
 async function readStdin() {
     if (process.stdin.isTTY) return null;
@@ -70,8 +37,6 @@ program
     .option('-b, --budget <usd>', 'cumulative USD budget; 0 = unlimited', (v) => Number(v), 5)
     .option('--cwd <dir>', 'project root for the agents/<slug>/ output (defaults to current dir)')
     .action(async (input, opts) => {
-        await loadEnv();
-
         let requirement = opts.text;
         let derivedName = null;
 

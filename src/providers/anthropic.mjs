@@ -1,53 +1,78 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { spawn } from 'node:child_process';
 import { zodToJsonSchema } from './schema.mjs';
 
-const RATES = {
-    'claude-opus-4-7': { in: 15.00, out: 75.00 },
-    'claude-sonnet-4-6': { in: 3.00, out: 15.00 },
-    'claude-haiku-4-5': { in: 1.00, out: 5.00 },
-};
+// Maps Anthropic model IDs (used in CLAUDE.md / .env) to claude CLI --model values.
+// claude CLI accepts aliases ('opus', 'sonnet', 'haiku') or full IDs.
+function resolveModel(model) {
+    if (!model) return 'opus';
+    if (/^(opus|sonnet|haiku)$/i.test(model)) return model.toLowerCase();
+    if (model.startsWith('claude-opus')) return 'opus';
+    if (model.startsWith('claude-sonnet')) return 'sonnet';
+    if (model.startsWith('claude-haiku')) return 'haiku';
+    return model;
+}
 
-let client = null;
-const getClient = () => {
-    if (!client) {
-        if (!process.env.ANTHROPIC_API_KEY) {
-            throw new Error('ANTHROPIC_API_KEY missing — see secure/.env.example');
-        }
-        client = new Anthropic();
-    }
-    return client;
-};
-
-export async function callAnthropic({ system, user, schema, schemaName, model = process.env.ANTHROPIC_MODEL || 'claude-opus-4-7', maxTokens = 16_000 }) {
-    const response = await getClient().messages.create({
-        model,
-        max_tokens: maxTokens,
-        system,
-        tools: [{
-            name: schemaName,
-            description: `Submit ${schemaName} result.`,
-            input_schema: zodToJsonSchema(schema),
-        }],
-        tool_choice: { type: 'tool', name: schemaName },
-        messages: [
-            { role: 'user', content: user },
-        ],
+function spawnAndCollect(cmd, args, { input } = {}) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (d) => { stdout += d.toString(); });
+        child.stderr.on('data', (d) => { stderr += d.toString(); });
+        child.on('error', reject);
+        child.on('close', (code) => {
+            if (code !== 0) {
+                const msg = stderr.trim() || stdout.trim() || `${cmd} exited ${code}`;
+                reject(new Error(`${cmd} exited ${code}: ${msg.slice(0, 1000)}`));
+                return;
+            }
+            resolve({ stdout, stderr });
+        });
+        if (input != null) child.stdin.write(input);
+        child.stdin.end();
     });
+}
 
-    const toolUse = response.content.find((c) => c.type === 'tool_use');
-    if (!toolUse) {
-        throw new Error('Anthropic returned no tool_use block');
+export async function callAnthropic({ system, user, schema, schemaName, model = process.env.ANTHROPIC_MODEL || 'opus' }) {
+    const cliModel = resolveModel(model);
+    const jsonSchema = JSON.stringify(zodToJsonSchema(schema));
+
+    const args = [
+        '--print',
+        '--output-format', 'json',
+        '--json-schema', jsonSchema,
+        '--model', cliModel,
+        '--exclude-dynamic-system-prompt-sections',
+    ];
+    if (system) args.push('--system-prompt', system);
+
+    const { stdout } = await spawnAndCollect('claude', args, { input: user });
+
+    let envelope;
+    try {
+        envelope = JSON.parse(stdout);
+    } catch (err) {
+        throw new Error(`claude CLI returned non-JSON output (first 500 chars): ${stdout.slice(0, 500)}`);
     }
 
-    const validated = schema.parse(toolUse.input);
+    if (envelope.is_error || envelope.subtype !== 'success') {
+        throw new Error(`claude CLI error: ${envelope.api_error_status ?? envelope.subtype} — ${envelope.result?.slice?.(0, 500) ?? ''}`);
+    }
 
-    const rates = RATES[model] || RATES['claude-opus-4-7'];
+    const raw = envelope.structured_output;
+    if (raw == null) {
+        throw new Error(`claude CLI gave no structured_output. Raw result: ${envelope.result?.slice?.(0, 500) ?? '(empty)'}`);
+    }
+    const data = schema.parse(raw);
+
+    const u = envelope.usage ?? {};
     const usage = {
-        input: response.usage.input_tokens,
-        output: response.usage.output_tokens,
-        usd: (response.usage.input_tokens * rates.in + response.usage.output_tokens * rates.out) / 1_000_000,
-        model,
+        input: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+        output: u.output_tokens ?? 0,
+        usd: 0, // subscription — no per-call cost
+        model: cliModel,
+        provider: 'claude-cli',
     };
 
-    return { data: validated, usage };
+    return { data, usage };
 }

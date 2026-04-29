@@ -6,7 +6,7 @@
 
 
 
-# 📐 Multi-agent RUP pipeline — OpenAI + Claude take a requirement through Inception → Elaboration → Construction → Transition and emit a complete design + implementation under agents/slug/ v2026.4.102
+# 📐 Multi-agent RUP pipeline — OpenAI + Claude take a requirement through Inception → Elaboration → Construction → Transition and emit a complete design + implementation under agents/slug/ v2026.4.103
 
 
   
@@ -34,9 +34,9 @@ v24.15.0
                         
 [//]: #@corifeus-header:end
 
-A multi-agent **RUP** (Rational Unified Process) pipeline for software design.
+A multi-agent **RUP** (Rational Unified Process) pipeline for software design — driven by your **Claude Code + ChatGPT subscriptions** (no API keys, no per-call cost).
 
-You hand it a one-paragraph requirement from a stakeholder. It hands you back a complete design dossier and a working implementation under `agents/<slug>/` — produced by **eleven role-played AI agents** that alternate between OpenAI and Claude across the four classic RUP phases:
+You hand it a one-paragraph requirement from a stakeholder. It hands you back a complete design dossier and a working implementation under `agents/<slug>/` — produced by **eleven role-played AI agents** that alternate between OpenAI (via `codex` CLI) and Claude (via `claude` CLI) across the four classic RUP phases:
 
 | Phase | Roles | Provider chain |
 | --- | --- | --- |
@@ -72,7 +72,42 @@ agents/<slug>/
     deploy.md                # local + production deploy + ops runbook
 ```
 
-## Install
+## Cheapest path: subscriptions, not API keys
+
+`p3x-architect` does **not** call the OpenAI or Anthropic HTTP APIs. It spawns the **`claude` CLI** (your Claude Code subscription) and the **`codex` CLI** (your ChatGPT subscription) as subprocesses and uses their structured-output flags (`--json-schema` for claude, `--output-schema` for codex).
+
+This is **deliberate, and it's the whole point**:
+
+- A single API run with `gpt-5.5` ($5 / $30 per 1M tok) + `claude-opus-4-7` ($15 / $75 per 1M tok) costs **$2–$10**. Ten runs a month → $20–$100 in API bills.
+- A Claude Pro subscription is ~$20/month flat. ChatGPT Plus is ~$20/month flat. **You already pay for these.** Running the architect against them is **$0 marginal cost.**
+- Trade-off: the CLI route is slower (5–15s per role × 11 roles = 1–3 min per pipeline run) and the model is whatever your subscription tier gives you. For the "boss handed me a feature, lay it out" use case, that's fine.
+
+### Prerequisites — install both CLIs and log in once
+
+#### 1. `claude` (Claude Code) — your Anthropic subscription
+
+Both ship as Node packages, so install is the same on **Linux, macOS, and Windows** (anywhere Node.js ≥ 18 runs):
+
+```bash
+npm install -g @anthropic-ai/claude-code
+# or, on macOS/Linux: curl -fsSL https://claude.ai/install.sh | bash
+```
+
+Then run `claude` once interactively — it opens a browser to OAuth into your **Claude Pro / Max** subscription. After that, `claude --print` works headlessly without prompts.
+
+#### 2. `codex` (Codex CLI) — your ChatGPT subscription
+
+```bash
+npm install -g @openai/codex
+# or, on macOS:  brew install codex
+# or grab a release binary from https://github.com/openai/codex/releases
+```
+
+Then run `codex login` once — opens a browser to attach your **ChatGPT Plus / Pro** subscription. After that, `codex exec` works headlessly without prompts.
+
+> Both CLIs put their auth in your home directory (`~/.claude/`, `~/.codex/`), so once you've logged in any subprocess spawned by `p3x-architect` picks it up.
+
+#### 3. `p3x-architect` itself
 
 ```bash
 yarn global add p3x-architect
@@ -80,17 +115,20 @@ yarn global add p3x-architect
 npm install -g p3x-architect
 ```
 
-Then drop your API keys into `secure/.env.architect` (or `secure/.env`):
+Or, if you don't want a global install, the MCP entry works fine on-demand via `npx -y p3x-architect-mcp`.
+
+### Model selection
+
+Models are picked automatically by the CLIs: `claude` defaults to `opus`, `codex` picks the highest model your account is entitled to (`gpt-5.5` as of 2026-04). To override:
 
 ```bash
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_MODEL=gpt-5.5
-ANTHROPIC_MODEL=claude-opus-4-7
-ARCHITECT_BUDGET_USD=25
+ANTHROPIC_MODEL=sonnet            # opus | sonnet | haiku
+CODEX_MODEL=gpt-5.5               # only set if you need to force a specific codex model
 ```
 
-The defaults are fine if you don't override them.
+### What if you'd rather use API keys?
+
+You can't, in this version. The HTTP-API providers were removed in favor of the CLI subprocess approach. If that ever needs to come back, it would land behind a flag (e.g. `--via-api`) — but no plans to do so.
 
 ## CLI usage
 
@@ -159,15 +197,18 @@ The tool blocks for 30–120 seconds while the pipeline runs. Returns a JSON sum
 
 ## Cost & timing
 
-A typical run on default models (`gpt-5.5` at \$5 / \$30 per 1M tokens + `claude-opus-4-7` at \$15 / \$75 per 1M tokens) costs **roughly \$2–\$10** depending on spec length and how many critic↔reviser rounds fire. The default `--budget 5` (or 25 in `.env.architect`) is a hard ceiling — if a role's call would push cumulative spend over budget, the pipeline aborts cleanly with a clear error.
+Because every role spawns your local `claude` / `codex` CLI, **runtime cost is $0** beyond your existing subscriptions. The `--budget` flag and `usd` fields in `pipeline.json` are kept for forward compatibility with an API-mode that may return later — they will all read `0` in CLI mode.
 
-Wall-clock time is dominated by the implementer + reviser steps (Claude Opus generating the full file set). Expect 30–60 s on a small spec, 90–180 s on a large one.
+Wall-clock time is dominated by `claude` startup (each invocation re-loads its tooling) plus inference latency. Expect:
 
-You can dial cost down by:
+- 5–15 seconds per role
+- 1–3 minutes for the full 11-role pipeline on a small spec
+- 3–6 minutes on a large one with two critic↔reviser rounds
 
-- Setting `OPENAI_MODEL=gpt-5-mini` (cheap roles still work fine for vision/requirements/risks/critic)
-- Setting `ANTHROPIC_MODEL=claude-sonnet-4-6` for the implementer
-- Lowering `--max-rounds 1`
+You can dial down latency with:
+
+- `ANTHROPIC_MODEL=sonnet` (faster than opus, still strong)
+- `--max-rounds 1` (skip the second critic round)
 
 ## Project structure
 
@@ -288,7 +329,7 @@ All my domains, including [patrikx3.com](https://patrikx3.com), [corifeus.eu](ht
 **🚨 Important Changes:** Any breaking changes are prominently noted in the readme to keep you informed.
 
 
-[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.102
+[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.103
 
  [![NPM](https://img.shields.io/npm/v/p3x-architect.svg)](https://www.npmjs.com/package/p3x-architect)  [![Donate for PatrikX3 / P3X](https://img.shields.io/badge/Donate-PatrikX3-003087.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QZVM4V6HVZJW6)  [![Contact Corifeus / P3X](https://img.shields.io/badge/Contact-P3X-ff9900.svg)](https://www.patrikx3.com/en/front/contact) [![Like Corifeus @ Facebook](https://img.shields.io/badge/LIKE-Corifeus-3b5998.svg)](https://www.facebook.com/corifeus.software)
 

@@ -1,36 +1,8 @@
-import path from 'node:path';
 import process from 'node:process';
-import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import fsExtra from 'fs-extra';
 import { architect } from './orchestrator.mjs';
-
-const { pathExists, readFile } = fsExtra;
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(__dirname, '..');
-
-async function loadEnvFile(envPath) {
-    if (!(await pathExists(envPath))) return false;
-    const content = await readFile(envPath, 'utf8');
-    for (const raw of content.split('\n')) {
-        const line = raw.trim();
-        if (!line || line.startsWith('#')) continue;
-        const eq = line.indexOf('=');
-        if (eq === -1) continue;
-        const key = line.slice(0, eq).trim();
-        let value = line.slice(eq + 1).trim();
-        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-            value = value.slice(1, -1);
-        }
-        if (!process.env[key]) process.env[key] = value;
-    }
-    return true;
-}
-
-await loadEnvFile(path.join(projectRoot, 'secure', '.env'));
-await loadEnvFile(path.join(projectRoot, 'secure', '.env.architect'));
 
 function slugify(input) {
     return input
