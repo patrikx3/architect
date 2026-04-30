@@ -1,6 +1,6 @@
 {
     "name": "p3x-architect",
-    "version": "2026.4.105",
+    "version": "2026.4.106",
     "corifeus": {
         "icon": "fas fa-drafting-compass",
         "icon-utf8": "📐",
@@ -13,7 +13,7 @@
         "reponame": "architect",
         "build": true
     },
-    "description": "📐 Multi-agent RUP pipeline — OpenAI + Claude take a requirement through Inception → Elaboration → Construction → Transition and emit a complete design + implementation under agents/slug/",
+    "description": "📐 P3X Architect - Multi-agent RUP pipeline — OpenAI + Claude take a requirement through Inception → Elaboration → Construction → Transition and emit a complete design + implementation under agents/slug/",
     "type": "module",
     "main": "src/index.mjs",
     "exports": {
