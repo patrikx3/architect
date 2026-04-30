@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fsExtra from 'fs-extra';
 import { zodToJsonSchema } from './schema.mjs';
+import { subLog } from './log-context.mjs';
 
 const { writeFile, readFile, remove, ensureDir } = fsExtra;
 
@@ -11,8 +12,20 @@ function spawnAndCollect(cmd, args, { input, env } = {}) {
         const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], env: env ?? process.env });
         let stdout = '';
         let stderr = '';
-        child.stdout.on('data', (d) => { stdout += d.toString(); });
-        child.stderr.on('data', (d) => { stderr += d.toString(); });
+        // codex exec's structured result is captured via --output-last-message file,
+        // so stdout here is the live agent transcript (thinking, tool calls). Forward
+        // every line of stdout AND stderr to the active log channel so the user sees
+        // codex working — never goes silent for minutes.
+        child.stdout.on('data', (d) => {
+            const s = d.toString();
+            stdout += s;
+            subLog(`  ↳ codex: ${s}`);
+        });
+        child.stderr.on('data', (d) => {
+            const s = d.toString();
+            stderr += s;
+            subLog(`  ↳ codex: ${s}`);
+        });
         child.on('error', reject);
         child.on('close', (code) => {
             if (code !== 0) {

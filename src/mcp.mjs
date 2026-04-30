@@ -12,12 +12,17 @@ function slugify(input) {
         .slice(0, 60) || 'unnamed';
 }
 
-const server = new McpServer({
-    name: 'p3x-architect',
-    version: '2026.4.1',
-    instructions:
-        'P3X Architect MCP — multi-agent RUP pipeline. Calls OpenAI + Claude through Inception → Elaboration → Construction → Transition, generating a full design and implementation under agents/<slug>/. Use the architect tool with a plain-language requirement; pipeline runs may take 30–120s and cost a few dollars.',
-});
+// `logging: {}` advertises that the server emits notifications/message — Claude Code
+// and other MCP clients render those inline as the tool runs, instead of the user
+// staring at silence for the 1–3 minutes a pipeline takes.
+const server = new McpServer(
+    { name: 'p3x-architect', version: '2026.4.1' },
+    {
+        capabilities: { logging: {} },
+        instructions:
+            'P3X Architect MCP — multi-agent RUP pipeline. Calls OpenAI + Claude through Inception → Elaboration → Construction → Transition, generating a full design and implementation under agents/<slug>/. Use the architect tool with a plain-language requirement; pipeline runs may take 30s–several minutes and stream live progress via notifications/message + notifications/progress.',
+    },
+);
 
 server.registerTool(
     'architect',
@@ -51,13 +56,36 @@ server.registerTool(
                 .describe('Cumulative USD budget across all roles. 0 = unlimited. Default: ARCHITECT_BUDGET_USD env var or 5.'),
         },
     },
-    async ({ requirement, slug, project_root, max_rounds, budget_usd }) => {
+    async ({ requirement, slug, project_root, max_rounds, budget_usd }, extra) => {
         const finalSlug = slug ?? slugify(requirement.slice(0, 40));
         const finalRoot = project_root ?? process.cwd();
         const finalBudget = budget_usd ?? Number(process.env.ARCHITECT_BUDGET_USD ?? 5);
         const finalRounds = max_rounds ?? 2;
 
         const logLines = [];
+        const progressToken = extra?._meta?.progressToken;
+        let progressStep = 0;
+
+        // Forward each orchestrator log line live so the MCP client (Claude Code,
+        // Cursor, etc.) shows progress while the pipeline runs — instead of a 30s+
+        // black box that finally returns at the end. Three channels:
+        //   1. process.stderr — picked up by every MCP host and shown in their log panel
+        //   2. notifications/message — clients with logging capability render this
+        //   3. notifications/progress — clients showing progress UI animate this
+        const forward = (msg) => {
+            logLines.push(msg);
+            process.stderr.write(`[p3x-architect] ${msg}\n`);
+            server.sendLoggingMessage({ level: 'info', logger: 'p3x-architect', data: msg })
+                .catch(() => { /* client has no logging capability — fine */ });
+            if (progressToken != null && extra?.sendNotification) {
+                progressStep += 1;
+                extra.sendNotification({
+                    method: 'notifications/progress',
+                    params: { progressToken, progress: progressStep, message: msg },
+                }).catch(() => { /* client has no progress capability — fine */ });
+            }
+        };
+
         try {
             const result = await architect({
                 requirement,
@@ -65,7 +93,7 @@ server.registerTool(
                 projectRoot: finalRoot,
                 maxRounds: finalRounds,
                 budgetUsd: finalBudget,
-                log: (msg) => logLines.push(msg),
+                log: forward,
             });
             const summary = {
                 ok: true,

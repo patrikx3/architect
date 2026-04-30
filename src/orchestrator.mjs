@@ -12,6 +12,7 @@ import criticRole from './roles/critic.mjs';
 import reviserRole from './roles/reviser.mjs';
 import acceptanceWriterRole from './roles/acceptance-writer.mjs';
 import deploymentWriterRole from './roles/deployment-writer.mjs';
+import { logStore, subLogFlush } from './providers/log-context.mjs';
 
 const { ensureDir, writeFile, readFile, remove, pathExists } = fsExtra;
 
@@ -35,7 +36,19 @@ const mergeFiles = (current, updated) => {
 
 const writeJson = (filePath, value) => writeFile(filePath, JSON.stringify(value, null, 2));
 
-export async function architect({
+export async function architect(opts) {
+    const log = opts.log ?? (() => {});
+    const ctx = { log, buffer: '' };
+    return logStore.run(ctx, async () => {
+        try {
+            return await runArchitect(opts, log);
+        } finally {
+            subLogFlush();
+        }
+    });
+}
+
+async function runArchitect({
     spec: specInput,
     specPath,
     requirement,
@@ -44,8 +57,7 @@ export async function architect({
     projectRoot,
     maxRounds = 2,
     budgetUsd = 5,
-    log = () => {},
-}) {
+}, log) {
     const requirementText = requirement
         ?? specInput
         ?? (specPath ? await readFile(specPath, 'utf8') : null);
@@ -84,81 +96,89 @@ export async function architect({
         }
     };
 
-    // ==================== Phase 1: Inception ====================
-    log('[inception] vision (OpenAI)…');
-    const visionDraft = await visionRole({ requirement: requirementText });
-    checkBudget('vision', visionDraft.usage);
+    // Wraps every role call so we get start, finish, elapsed-ms, and (via the
+    // log-context AsyncLocalStorage) every line of sub-CLI output in between.
+    // Effect: a typical pipeline emits ~50–100 log lines instead of ~22, so the
+    // user always sees something fresh during a long run.
+    const runRole = async (label, provider, fn) => {
+        const t0 = Date.now();
+        log(`[${label}] start (${provider})`);
+        const result = await fn();
+        const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+        log(`[${label}] done in ${elapsed}s`);
+        checkBudget(label, result.usage);
+        return result;
+    };
 
-    log('[inception] vision-reviewer (Claude)…');
-    const visionFinal = await visionReviewerRole({
-        requirement: requirementText,
-        vision: visionDraft.vision,
-    });
-    checkBudget('vision-reviewer', visionFinal.usage);
+    log(`[pipeline] start — slug=${slug ?? '(none)'}, output=${baseDir}`);
+
+    // ==================== Phase 1: Inception ====================
+    log('[phase] 1/4 inception');
+    const visionDraft = await runRole('vision', 'OpenAI/codex',
+        () => visionRole({ requirement: requirementText }));
+
+    const visionFinal = await runRole('vision-reviewer', 'Claude',
+        () => visionReviewerRole({ requirement: requirementText, vision: visionDraft.vision }));
 
     const vision = visionFinal.vision;
     await writeFile(path.join(dirs.inception, 'vision.md'), vision);
     await writeFile(path.join(dirs.inception, 'vision-review-notes.md'), visionFinal.notes);
+    log('[phase] 1/4 inception complete');
 
     // ==================== Phase 2: Elaboration ====================
-    log('[elaboration] requirements-analyst (OpenAI)…');
-    const reqs = await requirementsAnalystRole({ vision });
-    checkBudget('requirements-analyst', reqs.usage);
+    log('[phase] 2/4 elaboration');
+    const reqs = await runRole('requirements-analyst', 'OpenAI/codex',
+        () => requirementsAnalystRole({ vision }));
     await writeJson(path.join(dirs.elaboration, 'requirements.json'), reqs.requirements);
 
-    log(`[elaboration] architect (Claude)…`);
-    const arch = await architectRole({ vision, requirements: reqs.requirements });
-    checkBudget('architect', arch.usage);
+    const arch = await runRole('architect', 'Claude',
+        () => architectRole({ vision, requirements: reqs.requirements }));
     await writeFile(path.join(dirs.elaboration, 'architecture.md'), arch.architecture);
     await writeJson(path.join(dirs.elaboration, 'file_tree.json'), arch.fileTree);
+    log(`[architect] file tree: ${arch.fileTree.length} files`);
 
-    log('[elaboration] risk-analyst (OpenAI)…');
-    const risk = await riskAnalystRole({
-        vision,
-        requirements: reqs.requirements,
-        architecture: arch.architecture,
-    });
-    checkBudget('risk-analyst', risk.usage);
+    const risk = await runRole('risk-analyst', 'OpenAI/codex',
+        () => riskAnalystRole({ vision, requirements: reqs.requirements, architecture: arch.architecture }));
     await writeFile(
         path.join(dirs.elaboration, 'risks.md'),
         `# Risks\n\n## Summary\n\n${risk.summary}\n\n## Risk register\n\n\`\`\`json\n${JSON.stringify(risk.risks, null, 2)}\n\`\`\`\n`,
     );
 
-    log('[elaboration] design-reviewer (Claude)…');
-    const designReview = await designReviewerRole({
-        vision,
-        requirements: reqs.requirements,
-        architecture: arch.architecture,
-        fileTree: arch.fileTree,
-        risks: risk.risks,
-    });
-    checkBudget('design-reviewer', designReview.usage);
+    const designReview = await runRole('design-reviewer', 'Claude',
+        () => designReviewerRole({
+            vision,
+            requirements: reqs.requirements,
+            architecture: arch.architecture,
+            fileTree: arch.fileTree,
+            risks: risk.risks,
+        }));
     await writeFile(path.join(dirs.elaboration, 'design-review.md'), designReview.review);
     await writeJson(path.join(dirs.elaboration, 'design-findings.json'), designReview.findings);
-    log(`[elaboration] verdict: ${designReview.verdict}`);
+    log(`[design-reviewer] verdict: ${designReview.verdict}`);
+    log('[phase] 2/4 elaboration complete');
 
     // ==================== Phase 3: Construction ====================
-    log(`[construction] implementer (Claude, ${arch.fileTree.length} files)…`);
-    const impl = await implementerRole({
-        spec: vision,
-        requirements: reqs.requirements,
-        architecture: arch.architecture,
-        fileTree: arch.fileTree,
-    });
-    checkBudget('implementer', impl.usage);
-    let files = impl.files;
-    await writeProjectFiles(projectDir, files);
-
-    let lastIssues = [];
-    for (let round = 1; round <= maxRounds; round += 1) {
-        log(`[construction] critic round ${round} (OpenAI)…`);
-        const review = await criticRole({
+    log(`[phase] 3/4 construction (${arch.fileTree.length} files to generate)`);
+    const impl = await runRole('implementer', 'Claude',
+        () => implementerRole({
             spec: vision,
             requirements: reqs.requirements,
             architecture: arch.architecture,
-            files,
-        });
-        checkBudget(`critic-r${round}`, review.usage);
+            fileTree: arch.fileTree,
+        }));
+    let files = impl.files;
+    await writeProjectFiles(projectDir, files);
+    log(`[implementer] wrote ${files.length} files to ${projectDir}`);
+
+    let lastIssues = [];
+    for (let round = 1; round <= maxRounds; round += 1) {
+        const review = await runRole(`critic-r${round}`, 'OpenAI/codex',
+            () => criticRole({
+                spec: vision,
+                requirements: reqs.requirements,
+                architecture: arch.architecture,
+                files,
+            }));
         lastIssues = review.issues;
         await writeJson(
             path.join(dirs.construction, `issues-round-${round}.json`),
@@ -166,40 +186,44 @@ export async function architect({
         );
 
         const blocking = review.issues.filter(isBlocking);
-        log(`[construction] round ${round}: ${review.issues.length} issues (${blocking.length} blocking)`);
+        log(`[critic-r${round}] ${review.issues.length} issues, ${blocking.length} blocking`);
 
-        if (blocking.length === 0) break;
+        if (blocking.length === 0) {
+            log(`[critic-r${round}] no blocking issues — stopping critic loop`);
+            break;
+        }
         if (round >= maxRounds) {
-            log(`[construction] max rounds reached, ${blocking.length} blocking issues remain`);
+            log(`[critic-r${round}] max rounds reached, ${blocking.length} blocking issues remain`);
             break;
         }
 
-        log(`[construction] reviser round ${round} (Claude)…`);
-        const rev = await reviserRole({ spec: vision, files, issues: review.issues });
-        checkBudget(`reviser-r${round}`, rev.usage);
+        const rev = await runRole(`reviser-r${round}`, 'Claude',
+            () => reviserRole({ spec: vision, files, issues: review.issues }));
         files = mergeFiles(files, rev.files);
         await writeProjectFiles(projectDir, rev.files);
+        log(`[reviser-r${round}] revised ${rev.files.length} files`);
     }
+    log('[phase] 3/4 construction complete');
 
     // ==================== Phase 4: Transition ====================
-    log('[transition] acceptance-writer (OpenAI)…');
-    const acc = await acceptanceWriterRole({
-        vision,
-        requirements: reqs.requirements,
-        fileTree: arch.fileTree,
-        files,
-    });
-    checkBudget('acceptance-writer', acc.usage);
+    log('[phase] 4/4 transition');
+    const acc = await runRole('acceptance-writer', 'OpenAI/codex',
+        () => acceptanceWriterRole({
+            vision,
+            requirements: reqs.requirements,
+            fileTree: arch.fileTree,
+            files,
+        }));
     await writeFile(path.join(dirs.transition, 'acceptance.md'), acc.acceptance);
 
-    log('[transition] deployment-writer (Claude)…');
-    const dep = await deploymentWriterRole({
-        architecture: arch.architecture,
-        fileTree: arch.fileTree,
-        files,
-    });
-    checkBudget('deployment-writer', dep.usage);
+    const dep = await runRole('deployment-writer', 'Claude',
+        () => deploymentWriterRole({
+            architecture: arch.architecture,
+            fileTree: arch.fileTree,
+            files,
+        }));
     await writeFile(path.join(dirs.transition, 'deploy.md'), dep.deploy);
+    log('[phase] 4/4 transition complete');
 
     // ==================== Top-level README ====================
     const finishedAt = new Date();

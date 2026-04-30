@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { zodToJsonSchema } from './schema.mjs';
+import { subLog } from './log-context.mjs';
 
 // Maps Anthropic model IDs (used in CLAUDE.md / .env) to claude CLI --model values.
 // claude CLI accepts aliases ('opus', 'sonnet', 'haiku') or full IDs.
@@ -17,8 +18,15 @@ function spawnAndCollect(cmd, args, { input } = {}) {
         const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
         let stdout = '';
         let stderr = '';
+        // stdout is the structured JSON envelope — just capture, don't surface to user.
         child.stdout.on('data', (d) => { stdout += d.toString(); });
-        child.stderr.on('data', (d) => { stderr += d.toString(); });
+        // stderr is claude CLI progress / status — forward each line live to the
+        // active log channel (CLI console or MCP notifications).
+        child.stderr.on('data', (d) => {
+            const s = d.toString();
+            stderr += s;
+            subLog(`  ↳ claude: ${s}`);
+        });
         child.on('error', reject);
         child.on('close', (code) => {
             if (code !== 0) {
