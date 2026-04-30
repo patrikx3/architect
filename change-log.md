@@ -5,6 +5,10 @@
                         
 [//]: #@corifeus-header:end
 
+### v2026.4.110
+Released on 04/30/2026
+* FEATURE: Pair mode role split — Claude plans and reviews while Codex implements and revises.
+
 ### v2026.4.109
 Released on 04/30/2026
 * FEATURE: Pair mode (Claude + Codex) is now the default; use --rup to opt into the full RUP pipeline.
@@ -104,7 +108,7 @@ All my domains, including [patrikx3.com](https://patrikx3.com), [corifeus.eu](ht
 **🚨 Important Changes:** Any breaking changes are prominently noted in the readme to keep you informed.
 
 
-[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.109
+[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.110
 
  [![NPM](https://img.shields.io/npm/v/p3x-architect.svg)](https://www.npmjs.com/package/p3x-architect)  [![Donate for PatrikX3 / P3X](https://img.shields.io/badge/Donate-PatrikX3-003087.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QZVM4V6HVZJW6)  [![Contact Corifeus / P3X](https://img.shields.io/badge/Contact-P3X-ff9900.svg)](https://www.patrikx3.com/en/front/contact) [![Like Corifeus @ Facebook](https://img.shields.io/badge/LIKE-Corifeus-3b5998.svg)](https://www.facebook.com/corifeus.software)
 

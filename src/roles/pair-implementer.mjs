@@ -1,128 +1,85 @@
 import { z } from 'zod';
-import { callAnthropic } from '../providers/anthropic.mjs';
+import { callOpenAI } from '../providers/openai.mjs';
 
 const Schema = z.object({
-    plan: z.string(),
     files: z.array(z.object({
         path: z.string(),
         content: z.string(),
         mode: z.enum(['create', 'modify']),
-        change_notes: z.string(),
     })),
 });
 
-const SYSTEM = `You are a senior full-stack engineer working in fast pair-programming mode.
-You combine architect + implementer in a single pass: read the project, design the change,
-and write every file in one response. A second AI (codex) will critique your output afterwards
-— so be precise, but don't over-spec a separate design phase.
+const SYSTEM = `You are the implementer half of a 2-AI pair-programming workflow.
+
+Your role: IMPLEMENTER, REFACTORING ASSISTANT, TEST WRITER, GITHUB/CODE WORKER. You write
+code from a plan that Claude already produced. You do NOT redesign the architecture or
+second-guess the plan — execute it precisely. If the plan is missing detail, fill it in
+with the simplest correct option that follows the existing project's conventions.
 
 You receive:
-- A plain-language requirement
-- The COMPLETE list of paths in the existing project (every file under the target root,
-  even ones whose content was too large to embed)
-- The CONTENT of as many existing source files as fit in your context. May be empty
-  (greenfield) or populated (modify-existing-codebase)
+- The original plain-language requirement
+- A plan written by Claude (architecture rationale, design choices, risks)
+- A file_tree from Claude — paths to TOUCH, each with mode "create" or "modify" and change_notes
+- For every "modify" entry: the FULL current content of that file at the project root
 
-You produce:
-1. plan: a short Markdown rationale (3-8 sentences). Cover: greenfield vs modify-in-place,
-   key tech choices (only if greenfield), which subdirectory new files go under, what each
-   modification does. Do NOT write code in the plan — keep it design-level.
-2. files: COMPLETE final content of every file you create or modify. Each entry has:
-   - path (relative, forward slashes)
-   - content (the full new file)
-   - mode: "create" for new files, "modify" for changes to existing files
-   - change_notes: one short sentence of what this file does / changes (used by the critic)
+You produce: the full final content of every file in the tree.
 
-Layout inference (CRITICAL — do not skip):
-- Study the path list before deciding where to put new files. Common patterns:
-  * \`src/\` only → single-codebase JS/TS, new files under src/
-  * \`src/\` + \`src-server/\` → split frontend/backend, place backend under src-server/
-  * \`client/\` + \`server/\` → same idea
-  * \`apps/<name>/\`, \`packages/<name>/\` → monorepo workspace
-  * \`src-server/layer/express/api/<area>/\` → existing API namespace; new endpoints follow the same nesting
-  * \`src-server/layer/mongoose/schema/\` → existing schema folder; new schemas go there
-  * \`src/admin/\` vs \`src/front/\` → role-based UI splits
-- Place new files NEXT TO their existing siblings. Match existing extension (.mjs / .js / .ts),
-  import style (ESM vs CJS), naming, formatting.
+Rules:
+- Implement EVERY entry in the tree (both "create" and "modify"). Do not skip any.
+- For "create" entries: write a complete, runnable file from scratch.
+- For "modify" entries: start from the provided current content and apply ONLY the changes
+  described in change_notes plus whatever else the plan requires for this feature.
+  Preserve everything unrelated — imports, helpers, formatting, comments, license headers.
+  Do NOT rewrite the file in your own style.
+- Each returned file's content is the COMPLETE new file (not a patch / diff / partial).
+- Match the existing project's language, framework, indentation, quoting style, and
+  conventions. Read the surrounding code before deciding how to write yours.
+- Do not invent dependencies — only use what the plan specified or what is obvious from the
+  spec / existing imports.
+- Do not add files outside the tree. Do not delete files (omit them and they stay as-is).
+- Echo back the same path + mode the planner listed.
+- Write tests when the plan asks for them, or when the change includes a non-trivial pure
+  function and the project already has a test directory you can drop a test file into.`;
 
-Modify-in-place rules (when the project already has source code):
-- Reuse existing files. Do NOT propose creating files that duplicate existing ones at a different path.
-- For "modify" entries: start from the embedded current content and apply ONLY the changes
-  the requirement needs. Preserve everything unrelated — imports, helpers, formatting,
-  comments, license headers. Do NOT rewrite the file in your own style.
-- Each "modify" file's content is the COMPLETE new file (not a diff). The implementer is YOU.
-- Match the existing project's language, framework, indentation, quoting style, conventions.
-- Do not invent dependencies — use what's obvious from the existing imports.
-- Don't list files that don't actually change. Anything not in your files list stays as-is.
-
-Greenfield rules (when EXISTING project is empty or has only README/license boilerplate):
-- Files list must include every file the project needs to run: package manifest, config, source,
-  README placeholder. All entries have mode: "create".
-- Use the simplest design satisfying the requirement.
-
-Common rules:
-- Implement EVERY file in one response. Don't return placeholders or "see plan".
-- Don't add files outside what the requirement needs. Don't delete files (omit them and they stay).
-- Don't write code in the plan. Code goes in files[].content.`;
-
-const MAX_EXISTING_CHARS = 240_000;
-
-function formatPaths(paths) {
-    if (!paths?.length) return '_(empty — no existing files at target root)_';
-    return ['```', ...paths, '```'].join('\n');
-}
-
-function formatExisting(existingFiles) {
-    if (!existingFiles?.length) {
-        return '_(no source-file content to embed)_';
-    }
-    const blocks = [];
-    let total = 0;
-    let truncated = 0;
-    for (const f of existingFiles) {
-        const block = `## ${f.path}\n\n\`\`\`\n${f.content}\n\`\`\``;
-        if (total + block.length > MAX_EXISTING_CHARS) {
-            truncated += 1;
-            continue;
+function formatTree(fileTree, existingByPath) {
+    return fileTree.map((entry) => {
+        const lines = [`## ${entry.path}  (mode: ${entry.mode})`];
+        lines.push(`Purpose: ${entry.purpose}`);
+        if (entry.depends_on?.length) lines.push(`Depends on: ${entry.depends_on.join(', ')}`);
+        if (entry.change_notes) lines.push(`Notes: ${entry.change_notes}`);
+        if (entry.mode === 'modify') {
+            const current = existingByPath.get(entry.path);
+            if (current != null) {
+                lines.push('', 'Current content:', '```', current, '```');
+            } else {
+                lines.push('', '_(planner listed mode=modify but no current content was provided — treat as create)_');
+            }
         }
-        blocks.push(block);
-        total += block.length;
-    }
-    let header = '';
-    if (truncated > 0) {
-        header = `_(${existingFiles.length} file contents available; ${truncated} omitted to fit context — assume they exist as listed in the path tree above and stay unchanged unless your files list says otherwise)_\n\n`;
-    }
-    return header + blocks.join('\n\n');
+        return lines.join('\n');
+    }).join('\n\n');
 }
 
-export default async function pairImplementerRole({ requirement, existingFiles = [], existingPaths = [] }) {
-    const user = `# Requirement
+export default async function pairImplementerRole({ requirement, plan, fileTree, existingFiles = [] }) {
+    const existingByPath = new Map(existingFiles.map((f) => [f.path, f.content]));
+    const user = `# Original requirement
 
 ${requirement}
 
-# Existing project layout — every path under the project root
+# Plan (from Claude planner)
 
-${formatPaths(existingPaths)}
+${plan}
 
-# Existing project — source content (subset of the paths above, content embedded)
+# File tree to implement
 
-${formatExisting(existingFiles)}
+${formatTree(fileTree, existingByPath)}
 
-Produce the plan and the full final content of every file you create or modify.
-- Infer the project's layout convention from the path list (single-tree, src/+src-server/, client/+server/, monorepo, …) before deciding where new files go.
-- If the existing project is empty, treat it as greenfield and emit only "create" entries at sensible top-level paths.
-- If the existing project has code, prefer "modify" entries; only emit "create" for genuinely new files this requirement needs, placed next to their existing siblings.`;
+Produce the full final content for every file. Return all files in one tool call. Echo each file's mode (create / modify) so downstream tooling knows which were modifications.`;
 
-    const result = await callAnthropic({
+    const result = await callOpenAI({
         system: SYSTEM,
         user,
         schema: Schema,
         schemaName: 'pair_implementer_output',
-        maxTokens: 32_000,
     });
-    return {
-        plan: result.data.plan,
-        files: result.data.files,
-        usage: result.usage,
-    };
+    return { files: result.data.files, usage: result.usage };
 }

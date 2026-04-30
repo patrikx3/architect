@@ -6,7 +6,7 @@
 
 
 
-# 📐 P3X Architect — Pair-programming AI by default (Claude implements + Codex critiques, ~30-60s on small specs). Add --rup (CLI) or rup:true (MCP) to run the full multi-agent RUP design pipeline (vision, requirements, architecture, risks, acceptance, deploy → 11 roles, 1-3 min) when you actually need a design dossier. Scans your project root and either creates a new project (greenfield) or modifies existing code in place — matching your layout (src/, src-server/, client/server/, monorepo). Code lands at the project root; design artifacts under agents/slug/. v2026.4.109
+# 📐 P3X Architect — Pair-programming AI by default (Claude implements + Codex critiques, ~30-60s on small specs). Add --rup (CLI) or rup:true (MCP) to run the full multi-agent RUP design pipeline (vision, requirements, architecture, risks, acceptance, deploy → 11 roles, 1-3 min) when you actually need a design dossier. Scans your project root and either creates a new project (greenfield) or modifies existing code in place — matching your layout (src/, src-server/, client/server/, monorepo). Code lands at the project root; design artifacts under agents/slug/. v2026.4.110
 
 
   
@@ -40,17 +40,22 @@ You hand it a one-paragraph requirement. It scans the project root, decides whet
 
 ## Two modes
 
-### `pair` mode — default (fast, 2-3 calls, ~30-60s on small specs)
+### `pair` mode — default (1 task, 2 AIs, fixed role split)
 
-For 90% of feature work you don't need a multi-phase design dossier — you need code, and a second pair of eyes on it. Pair mode does exactly that:
+For 90% of feature work you don't need a multi-phase design dossier — you need code, and a second pair of eyes on it. Pair mode does exactly that. Roles are FIXED per AI to play to each model's strengths:
+
+- **Claude** = architect, planner, reviewer, risk checker. NEVER writes file content.
+- **Codex** = implementer, refactoring assistant, test writer, code worker. NEVER plans architecture.
+- **You** (human) = final architect + approval authority.
 
 | Step | Role | Provider |
 | --- | --- | --- |
-| 1 | `pair-implementer` — plans + writes every file in one call | Claude |
-| 2 | `critic` — reviews the diff for spec violations, regressions, bugs | OpenAI (codex) |
-| 3 | `reviser` — applies fixes if the critic flagged anything blocking (skipped otherwise) | Claude |
+| 1 | `pair-planner` — produces plan + file_tree (paths + change_notes, no content) | **Claude** |
+| 2 | `pair-implementer` — writes the full content of every file from Claude's plan | **Codex** |
+| 3 | `pair-reviewer` — produces structured issues list (severity / file / fix_hint) | **Claude** |
+| 4 | `pair-reviser` — applies fixes if there are blocking issues (skipped otherwise) | **Codex** |
 
-Two AIs, one round-trip each (plus an optional revise round). The cross-provider review still catches blind spots a single model would miss — but you skip the formal vision / requirements / architecture / risks / acceptance / deploy phases that most small changes don't need.
+Wall-clock: ~30-90s on small specs depending on whether step 4 fires. The cross-provider review catches blind spots a single model would miss — and the role split lets each AI do what it's actually good at instead of asking one to wear every hat. RUP's vision / requirements / architecture / risks / acceptance / deploy phases are skipped here.
 
 ### `rup` mode — `--rup` (full design dossier, 11 roles, 1-3 min)
 
@@ -78,10 +83,11 @@ Both modes write to **two places**:
 <project root>/                # ← actual code lands here in place
   ...modified existing files / new files next to siblings...
   agents/<slug>/
-    README.md                   # quick summary, mode, file counts, blocking-issue count
-    plan.md                     # Claude's plan/rationale (greenfield vs modify, layout choices)
+    README.md                   # quick summary, role split, mode, file counts, blocking-issue count
+    plan.md                     # Claude planner's rationale (greenfield vs modify, layout choices)
+    file_tree.json              # what Claude planned for Codex to implement
     changes.json                # { created: [...], modified: [...] }
-    issues-round-1.json         # codex critic findings (one round by default)
+    issues-round-1.json         # Claude reviewer findings (one round by default; empty array = clean)
     pipeline.json               # per-role token usage + timing
 ```
 
@@ -291,7 +297,7 @@ Because every role spawns your local `claude` / `codex` CLI, **runtime cost is $
 Wall-clock time is dominated by `claude` / `codex` startup (each invocation re-loads its tooling) plus inference latency. Expect:
 
 - 5–15 seconds per role
-- **Pair mode (default):** ~30–60s on a small spec (1 implement + 1 critic, optional 1 revise)
+- **Pair mode (default):** ~30–90s on a small spec (Claude plan + Codex implement + Claude review + optional Codex revise)
 - **RUP mode (`--rup`):** 1–3 minutes for the full 11-role pipeline on a small spec; 3–6 minutes on a large one with two critic↔reviser rounds
 
 You can dial down latency with:
@@ -314,7 +320,10 @@ src/
     schema.mjs           # Zod 4 → JSON Schema (strict, additionalProperties:false)
     log-context.mjs      # AsyncLocalStorage for streaming sub-CLI output to the orchestrator
   roles/
-    pair-implementer.mjs      # pair mode — Claude (plan + every file in one call)
+    pair-planner.mjs          # pair mode — Claude (plan + file_tree, no content)
+    pair-implementer.mjs      # pair mode — Codex (writes full content from plan)
+    pair-reviewer.mjs         # pair mode — Claude (issues list)
+    pair-reviser.mjs          # pair mode — Codex (applies fixes)
     vision.mjs                # RUP Phase 1 — OpenAI
     vision-reviewer.mjs       # RUP Phase 1 — Claude
     requirements-analyst.mjs  # RUP Phase 2 — OpenAI
@@ -322,8 +331,8 @@ src/
     risk-analyst.mjs          # RUP Phase 2 — OpenAI
     design-reviewer.mjs       # RUP Phase 2 — Claude
     implementer.mjs           # RUP Phase 3 — Claude
-    critic.mjs                # both modes — OpenAI
-    reviser.mjs               # both modes — Claude
+    critic.mjs                # RUP Phase 3 — OpenAI
+    reviser.mjs               # RUP Phase 3 — Claude
     acceptance-writer.mjs     # RUP Phase 4 — OpenAI
     deployment-writer.mjs     # RUP Phase 4 — Claude
 bin/
@@ -432,7 +441,7 @@ All my domains, including [patrikx3.com](https://patrikx3.com), [corifeus.eu](ht
 **🚨 Important Changes:** Any breaking changes are prominently noted in the readme to keep you informed.
 
 
-[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.109
+[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.110
 
  [![NPM](https://img.shields.io/npm/v/p3x-architect.svg)](https://www.npmjs.com/package/p3x-architect)  [![Donate for PatrikX3 / P3X](https://img.shields.io/badge/Donate-PatrikX3-003087.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QZVM4V6HVZJW6)  [![Contact Corifeus / P3X](https://img.shields.io/badge/Contact-P3X-ff9900.svg)](https://www.patrikx3.com/en/front/contact) [![Like Corifeus @ Facebook](https://img.shields.io/badge/LIKE-Corifeus-3b5998.svg)](https://www.facebook.com/corifeus.software)
 

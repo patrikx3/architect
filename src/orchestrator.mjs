@@ -12,7 +12,10 @@ import criticRole from './roles/critic.mjs';
 import reviserRole from './roles/reviser.mjs';
 import acceptanceWriterRole from './roles/acceptance-writer.mjs';
 import deploymentWriterRole from './roles/deployment-writer.mjs';
+import pairPlannerRole from './roles/pair-planner.mjs';
 import pairImplementerRole from './roles/pair-implementer.mjs';
+import pairReviewerRole from './roles/pair-reviewer.mjs';
+import pairReviserRole from './roles/pair-reviser.mjs';
 import { logStore, subLogFlush } from './providers/log-context.mjs';
 import { scanProject } from './scan-project.mjs';
 
@@ -148,8 +151,15 @@ async function setupRun({
 }
 
 // ==============================================================
-// PAIR mode (default) — Claude implements + Codex critiques (+optional Claude revise).
-// 2-3 AI calls instead of 11. Wall-clock target: ~30-60s on small specs.
+// PAIR mode (default) — 1 task, 2 AIs, fixed role split:
+//   Claude  = architect / planner / reviewer / risk checker  (NEVER writes file content)
+//   Codex   = implementer / refactor / test writer            (NEVER plans architecture)
+//   Human   = final architect + approval authority
+// Pipeline:
+//   1. pair-planner    (Claude) → plan + file_tree (no content)
+//   2. pair-implementer (Codex) → full content for every file in the tree
+//   3. pair-reviewer   (Claude) → issues list
+//   4. pair-reviser    (Codex)  → revised files (only if blocking issues + rounds left)
 // ==============================================================
 
 async function runPairArchitect(opts, log) {
@@ -164,51 +174,57 @@ async function runPairArchitect(opts, log) {
 
     log(`[pipeline] start (pair mode) — slug=${slug ?? '(none)'}, output=${baseDir}`);
 
-    // ---- Step 1: Claude pair-implementer (plan + every file in one call) ----
-    const impl = await runRole('pair-implementer', 'Claude',
-        () => pairImplementerRole({
+    // ---- Step 1: pair-planner (Claude) — plan + file_tree, no content ----
+    const planResult = await runRole('pair-planner', 'Claude',
+        () => pairPlannerRole({
             requirement: requirementText,
             existingFiles: scan.files,
             existingPaths: scan.paths,
         }));
+    const { plan, fileTree } = planResult;
+    const planCreate = fileTree.filter((e) => e.mode === 'create').length;
+    const planModify = fileTree.filter((e) => e.mode === 'modify').length;
+    log(`[pair-planner] file_tree: ${fileTree.length} entries (${planCreate} create, ${planModify} modify)`);
+    await writeFile(path.join(baseDir, 'plan.md'), plan);
+    await writeJson(path.join(baseDir, 'file_tree.json'), fileTree);
 
+    // ---- Step 2: pair-implementer (Codex) — write every file from the plan ----
+    const impl = await runRole('pair-implementer', 'OpenAI/codex',
+        () => pairImplementerRole({
+            requirement: requirementText,
+            plan,
+            fileTree,
+            existingFiles: scan.files,
+        }));
     let files = impl.files;
-    const createCount = files.filter((f) => f.mode === 'create').length;
-    const modifyCount = files.filter((f) => f.mode === 'modify').length;
-    log(`[pair-implementer] plan + ${files.length} files (${createCount} create, ${modifyCount} modify)`);
-    await writeFile(path.join(baseDir, 'plan.md'), impl.plan);
+    log(`[pair-implementer] produced ${files.length} files`);
     await writeProjectFiles(root, files, log);
 
-    // ---- Step 2..N: Codex critic, Claude reviser (until clean or maxRounds) ----
+    // ---- Step 3..N: pair-reviewer (Claude) ↔ pair-reviser (Codex) ----
     let lastIssues = [];
     for (let round = 1; round <= maxRounds; round += 1) {
-        const review = await runRole(`critic-r${round}`, 'OpenAI/codex',
-            () => criticRole({
-                spec: requirementText,
-                requirements: [],
-                architecture: impl.plan,
-                files,
-            }));
+        const review = await runRole(`pair-reviewer-r${round}`, 'Claude',
+            () => pairReviewerRole({ requirement: requirementText, plan, files }));
         lastIssues = review.issues;
         await writeJson(path.join(baseDir, `issues-round-${round}.json`), review.issues);
 
         const blocking = review.issues.filter(isBlocking);
-        log(`[critic-r${round}] ${review.issues.length} issues, ${blocking.length} blocking`);
+        log(`[pair-reviewer-r${round}] ${review.issues.length} issues, ${blocking.length} blocking`);
 
         if (blocking.length === 0) {
-            log(`[critic-r${round}] no blocking issues — stopping critic loop`);
+            log(`[pair-reviewer-r${round}] no blocking issues — stopping review loop`);
             break;
         }
         if (round >= maxRounds) {
-            log(`[critic-r${round}] max rounds reached, ${blocking.length} blocking issues remain`);
+            log(`[pair-reviewer-r${round}] max rounds reached, ${blocking.length} blocking issues remain`);
             break;
         }
 
-        const rev = await runRole(`reviser-r${round}`, 'Claude',
-            () => reviserRole({ spec: requirementText, files, issues: review.issues }));
+        const rev = await runRole(`pair-reviser-r${round}`, 'OpenAI/codex',
+            () => pairReviserRole({ requirement: requirementText, plan, files, issues: review.issues }));
         files = mergeFiles(files, rev.files);
         await writeProjectFiles(root, rev.files, log);
-        log(`[reviser-r${round}] revised ${rev.files.length} files`);
+        log(`[pair-reviser-r${round}] revised ${rev.files.length} files`);
     }
 
     const changesManifest = {
@@ -237,7 +253,7 @@ async function runPairArchitect(opts, log) {
         modifiedCount: changesManifest.modified.length,
         mode: changesManifest.mode,
         projectRoot: root,
-        roundsRun: usageLog.filter((u) => u.role.startsWith('critic-r')).length,
+        roundsRun: usageLog.filter((u) => u.role.startsWith('pair-reviewer-r')).length,
         remainingBlocking,
     });
     await writeFile(path.join(baseDir, 'README.md'), readme);
@@ -302,11 +318,18 @@ ${reqExcerpt}
 | Critic rounds | ${roundsRun} |
 | Remaining blocking issues | ${remainingBlocking} |
 
+## Role split (1 task / 2 AI workflow)
+
+- **Claude** — architect, planner, reviewer, risk checker. Wrote [plan.md](plan.md) and the issues lists.
+- **Codex** — implementer, refactoring, test writer. Wrote every file under the project root.
+- **You** — final architect + approval authority.
+
 ## Outputs
 
-- [plan.md](plan.md) — Claude's plan / rationale (greenfield vs modify, layout choices, what each file does)
+- [plan.md](plan.md) — Claude planner's rationale (greenfield vs modify, layout choices, what each file does)
+- [file_tree.json](file_tree.json) — what Claude planned for Codex to implement
 - [changes.json](changes.json) — manifest of created vs. modified files at the project root
-- \`issues-round-N.json\` — codex critic findings per round
+- \`issues-round-N.json\` — Claude reviewer findings per round (empty file = no issues)
 
 ## Next steps
 

@@ -20,16 +20,16 @@ const server = new McpServer(
     {
         capabilities: { logging: {} },
         instructions:
-            'P3X Architect MCP — pair-programming AI by default (Claude implements + Codex critiques, ~30-60s, 2-3 calls). Pass `rup: true` to run the full multi-agent RUP pipeline (Inception → Elaboration → Construction → Transition, 11 roles, 1-3 min) when designing something complex. Either way, code is written/edited in place at the project root (greenfield if empty, modify-existing-codebase otherwise) and the design artifacts land under agents/<slug>/. Streams live progress via notifications/message + notifications/progress.',
+            'P3X Architect MCP — pair-programming AI by default (1 task / 2 AIs / fixed role split): Claude is planner + reviewer, Codex is implementer + reviser. ~30-90s, 2-4 calls. Pass `rup: true` to run the full multi-agent RUP pipeline (Inception → Elaboration → Construction → Transition, 11 roles, 1-3 min) when designing something complex. Either way, code is written/edited in place at the project root (greenfield if empty, modify-existing-codebase otherwise) and the design artifacts land under agents/<slug>/. Streams live progress via notifications/message + notifications/progress.',
     },
 );
 
 server.registerTool(
     'architect',
     {
-        title: 'Architect — pair-programming AI (default) or full RUP pipeline (--rup)',
+        title: 'Architect — pair-programming AI (default) or full RUP pipeline (rup:true)',
         description:
-            'Default = fast pair mode: Claude writes the implementation in one pass, Codex critiques, Claude revises if needed. ~30-60s on small specs. Pass `rup: true` for the full design pipeline (vision, requirements, architecture, file_tree, risks, design review, acceptance + deployment docs) — slower (1-3 min) but produces a complete design dossier. Both modes apply changes directly to <project_root>: greenfield projects get a fresh tree; existing codebases get in-place edits matching their layout (src/, src-server/, client/server/, monorepo, …). Uses local `claude` + `codex` CLIs (subscription mode = $0 marginal cost).',
+            'Default = fast pair mode (1 task, 2 AIs, fixed role split). Claude plans (architecture, file_tree) → Codex implements (writes every file) → Claude reviews (issues list) → Codex revises (only if blocking issues). ~30-90s on small specs. Pass `rup: true` for the full design pipeline (vision, requirements, architecture, file_tree, risks, design review, acceptance + deployment docs) — slower (1-3 min) but produces a complete design dossier. Both modes apply changes directly to <project_root>: greenfield projects get a fresh tree; existing codebases get in-place edits matching their layout (src/, src-server/, client/server/, monorepo, …). Uses local `claude` + `codex` CLIs (subscription mode = $0 marginal cost).',
         inputSchema: {
             requirement: z
                 .string()
