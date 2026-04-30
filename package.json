@@ -1,6 +1,6 @@
 {
     "name": "p3x-architect",
-    "version": "2026.4.107",
+    "version": "2026.4.108",
     "corifeus": {
         "icon": "fas fa-drafting-compass",
         "icon-utf8": "📐",
@@ -13,7 +13,7 @@
         "reponame": "architect",
         "build": true
     },
-    "description": "📐 P3X Architect - Multi-agent RUP pipeline — OpenAI + Claude take a requirement through Inception → Elaboration → Construction → Transition and emit a complete design + implementation under agents/slug/",
+    "description": "📐 P3X Architect — Multi-agent RUP pipeline (OpenAI + Claude). Scans your project root and either creates a new project at the root (greenfield) or modifies the existing code in place — matching your existing layout (src/, src-server/, client/server/, monorepo). Design dossier (vision, requirements, architecture, risks, acceptance, deploy) lands under agents/slug/. The actual code is NOT generated under agents/ — it goes where it would normally live.",
     "type": "module",
     "main": "src/index.mjs",
     "exports": {
