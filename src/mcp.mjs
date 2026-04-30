@@ -20,20 +20,24 @@ const server = new McpServer(
     {
         capabilities: { logging: {} },
         instructions:
-            'P3X Architect MCP — multi-agent RUP pipeline. Calls OpenAI + Claude through Inception → Elaboration → Construction → Transition. Writes/edits code in place at the project root (greenfield if empty, modify-existing-codebase otherwise) and saves the design dossier under agents/<slug>/. Pipeline runs may take 30s–several minutes and stream live progress via notifications/message + notifications/progress.',
+            'P3X Architect MCP — pair-programming AI by default (Claude implements + Codex critiques, ~30-60s, 2-3 calls). Pass `rup: true` to run the full multi-agent RUP pipeline (Inception → Elaboration → Construction → Transition, 11 roles, 1-3 min) when designing something complex. Either way, code is written/edited in place at the project root (greenfield if empty, modify-existing-codebase otherwise) and the design artifacts land under agents/<slug>/. Streams live progress via notifications/message + notifications/progress.',
     },
 );
 
 server.registerTool(
     'architect',
     {
-        title: 'Architect — multi-agent RUP pipeline',
+        title: 'Architect — pair-programming AI (default) or full RUP pipeline (--rup)',
         description:
-            'Generate a full design (vision, requirements, architecture, file_tree, risks, design review) and apply the implementation directly to <project_root>: greenfield projects get a fresh tree, existing codebases get in-place edits matching their layout (src/, src-server/, client/server/, monorepo, …). Critic↔reviser rounds tighten the result; acceptance + deployment docs land under <project_root>/agents/<slug>/. Uses OpenAI + Claude. Subscription mode = $0 marginal cost, ~30s–several minutes wall-clock.',
+            'Default = fast pair mode: Claude writes the implementation in one pass, Codex critiques, Claude revises if needed. ~30-60s on small specs. Pass `rup: true` for the full design pipeline (vision, requirements, architecture, file_tree, risks, design review, acceptance + deployment docs) — slower (1-3 min) but produces a complete design dossier. Both modes apply changes directly to <project_root>: greenfield projects get a fresh tree; existing codebases get in-place edits matching their layout (src/, src-server/, client/server/, monorepo, …). Uses local `claude` + `codex` CLIs (subscription mode = $0 marginal cost).',
         inputSchema: {
             requirement: z
                 .string()
                 .describe('Plain-language requirement, task, or feature spec from the stakeholder. Can be one paragraph or several pages of Markdown.'),
+            rup: z
+                .boolean()
+                .optional()
+                .describe('Set to true to run the full multi-agent RUP pipeline (11 roles across Inception → Elaboration → Construction → Transition). Use when designing something complex enough to warrant a full design dossier. Default false = fast pair mode (Claude + Codex, 2-3 calls).'),
             slug: z
                 .string()
                 .optional()
@@ -41,14 +45,14 @@ server.registerTool(
             project_root: z
                 .string()
                 .optional()
-                .describe('Absolute path to the target project root. Code is created/modified in place here; the design dossier lands under <project_root>/agents/<slug>/. Defaults to the MCP server cwd.'),
+                .describe('Absolute path to the target project root. Code is created/modified in place here; the design artifacts land under <project_root>/agents/<slug>/. Defaults to the MCP server cwd.'),
             max_rounds: z
                 .number()
                 .int()
                 .min(1)
                 .max(5)
                 .optional()
-                .describe('Maximum critic↔reviser rounds in Construction (default 2).'),
+                .describe('Maximum critic↔reviser rounds. Default 1 in pair mode, 2 in RUP mode.'),
             budget_usd: z
                 .number()
                 .min(0)
@@ -56,11 +60,13 @@ server.registerTool(
                 .describe('Cumulative USD budget across all roles. 0 = unlimited. Default: ARCHITECT_BUDGET_USD env var or 5.'),
         },
     },
-    async ({ requirement, slug, project_root, max_rounds, budget_usd }, extra) => {
+    async ({ requirement, rup, slug, project_root, max_rounds, budget_usd }, extra) => {
         const finalSlug = slug ?? slugify(requirement.slice(0, 40));
         const finalRoot = project_root ?? process.cwd();
         const finalBudget = budget_usd ?? Number(process.env.ARCHITECT_BUDGET_USD ?? 5);
-        const finalRounds = max_rounds ?? 2;
+        const mode = rup === true ? 'rup' : 'pair';
+        const defaultRounds = mode === 'rup' ? 2 : 1;
+        const finalRounds = max_rounds ?? defaultRounds;
 
         const logLines = [];
         const progressToken = extra?._meta?.progressToken;
@@ -91,6 +97,7 @@ server.registerTool(
                 requirement,
                 slug: finalSlug,
                 projectRoot: finalRoot,
+                mode,
                 maxRounds: finalRounds,
                 budgetUsd: finalBudget,
                 log: forward,
@@ -98,10 +105,13 @@ server.registerTool(
             const summary = {
                 ok: true,
                 slug: finalSlug,
+                pipeline_mode: result.pipelineMode,
                 base_dir: result.baseDir,
-                project_dir: result.projectDir,
+                project_root: result.projectRoot,
                 verdict: result.verdict,
                 files: result.files.length,
+                created: result.created.length,
+                modified: result.modified.length,
                 remaining_blocking_issues: result.issues.filter(
                     (i) => i.severity === 'high' || i.severity === 'medium',
                 ).length,

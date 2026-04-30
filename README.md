@@ -6,7 +6,7 @@
 
 
 
-# 📐 P3X Architect — Multi-agent RUP pipeline (OpenAI + Claude). Scans your project root and either creates a new project at the root (greenfield) or modifies the existing code in place — matching your existing layout (src/, src-server/, client/server/, monorepo). Design dossier (vision, requirements, architecture, risks, acceptance, deploy) lands under agents/slug/. The actual code is NOT generated under agents/ — it goes where it would normally live. v2026.4.108
+# 📐 P3X Architect — Pair-programming AI by default (Claude implements + Codex critiques, ~30-60s on small specs). Add --rup (CLI) or rup:true (MCP) to run the full multi-agent RUP design pipeline (vision, requirements, architecture, risks, acceptance, deploy → 11 roles, 1-3 min) when you actually need a design dossier. Scans your project root and either creates a new project (greenfield) or modifies existing code in place — matching your layout (src/, src-server/, client/server/, monorepo). Code lands at the project root; design artifacts under agents/slug/. v2026.4.109
 
 
   
@@ -34,11 +34,27 @@ v24.15.0
                         
 [//]: #@corifeus-header:end
 
-A multi-agent **RUP** (Rational Unified Process) pipeline for software design — driven by your **Claude Code + ChatGPT subscriptions** (no API keys, no per-call cost).
+Pair-programming AI for code changes — driven by your **Claude Code + ChatGPT subscriptions** (no API keys, no per-call cost).
 
-You hand it a one-paragraph requirement from a stakeholder. It scans the project root, decides whether you're greenfield or extending an existing codebase, and either **creates a new project at the root** or **modifies the existing files in place** — matching your existing layout (`src/`, `src-server/`, `client/`, `server/`, monorepo workspaces, …). The design dossier (vision, requirements, architecture, risks, acceptance, deploy) lands under `agents/<slug>/` for review; the actual code goes where it would normally live.
+You hand it a one-paragraph requirement. It scans the project root, decides whether you're greenfield or extending an existing codebase, and either **creates a new project at the root** or **modifies the existing files in place** — matching your existing layout (`src/`, `src-server/`, `client/`, `server/`, monorepo workspaces, …). The actual code lands where it would normally live; a small design artifact (`plan.md` in pair mode, full dossier in `--rup` mode) lands under `agents/<slug>/`.
 
-The work is done by **eleven role-played AI agents** that alternate between OpenAI (via `codex` CLI) and Claude (via `claude` CLI) across the four classic RUP phases:
+## Two modes
+
+### `pair` mode — default (fast, 2-3 calls, ~30-60s on small specs)
+
+For 90% of feature work you don't need a multi-phase design dossier — you need code, and a second pair of eyes on it. Pair mode does exactly that:
+
+| Step | Role | Provider |
+| --- | --- | --- |
+| 1 | `pair-implementer` — plans + writes every file in one call | Claude |
+| 2 | `critic` — reviews the diff for spec violations, regressions, bugs | OpenAI (codex) |
+| 3 | `reviser` — applies fixes if the critic flagged anything blocking (skipped otherwise) | Claude |
+
+Two AIs, one round-trip each (plus an optional revise round). The cross-provider review still catches blind spots a single model would miss — but you skip the formal vision / requirements / architecture / risks / acceptance / deploy phases that most small changes don't need.
+
+### `rup` mode — `--rup` (full design dossier, 11 roles, 1-3 min)
+
+When you're designing something complex enough to warrant a real design dossier — a new subsystem, a non-trivial migration, an architectural decision — pass `--rup` (CLI) or `rup: true` (MCP). The full **RUP** (Rational Unified Process) pipeline runs across the four classic phases:
 
 | Phase | Roles | Provider chain |
 | --- | --- | --- |
@@ -47,14 +63,29 @@ The work is done by **eleven role-played AI agents** that alternate between Open
 | **3. Construction** | `implementer`, `critic` ↔ `reviser` (loop) | Claude, then OpenAI ↔ Claude |
 | **4. Transition** | `acceptance-writer`, `deployment-writer` | OpenAI → Claude |
 
-Each phase's outputs feed the next. The cross-provider chain catches blind spots a single model would miss — when OpenAI writes the requirements, Claude reviews them; when Claude writes the architecture, OpenAI flags the risks; when Claude implements, OpenAI critiques.
+Each phase's outputs feed the next. You get the full dossier (vision, requirements, architecture, risks, acceptance, deploy) under `agents/<slug>/` — useful even if you discard the generated code and re-implement by hand.
 
 ## What you get
 
-The pipeline writes to **two places**:
+Both modes write to **two places**:
 
 1. **The project root itself** — actual code. Greenfield projects get a fresh tree at the root; existing codebases get in-place edits matching their layout. Review it with `git diff`.
-2. **`agents/<slug>/`** — the design dossier (vision, requirements, architecture, risks, acceptance, deploy) plus a `changes.json` manifest of every path created vs. modified.
+2. **`agents/<slug>/`** — the design artifact: small in pair mode, full dossier in `--rup` mode.
+
+### Pair mode output (default)
+
+```text
+<project root>/                # ← actual code lands here in place
+  ...modified existing files / new files next to siblings...
+  agents/<slug>/
+    README.md                   # quick summary, mode, file counts, blocking-issue count
+    plan.md                     # Claude's plan/rationale (greenfield vs modify, layout choices)
+    changes.json                # { created: [...], modified: [...] }
+    issues-round-1.json         # codex critic findings (one round by default)
+    pipeline.json               # per-role token usage + timing
+```
+
+### RUP mode output (`--rup`)
 
 ```text
 <project root>/                # ← actual code lands here in place
@@ -82,7 +113,7 @@ The pipeline writes to **two places**:
       deploy.md                 # local + production deploy + ops runbook
 ```
 
-The architect role studies your existing folder layout (`src/`, `src-server/`, `client/server/`, monorepo workspaces, …) before deciding where new files go. New backend code lands next to existing backend code; new frontend code next to the frontend; new admin endpoints next to existing admin endpoints. **No nested `construction/project/` copy of your repo any more.**
+In both modes, the implementer studies your existing folder layout (`src/`, `src-server/`, `client/server/`, monorepo workspaces, …) before deciding where new files go. New backend code lands next to existing backend code; new frontend code next to the frontend; new admin endpoints next to existing admin endpoints. **No nested `construction/project/` copy of your repo.**
 
 ## Cheapest path: subscriptions, not API keys
 
@@ -90,9 +121,10 @@ The architect role studies your existing folder layout (`src/`, `src-server/`, `
 
 This is **deliberate, and it's the whole point**:
 
-- A single API run with `gpt-5.5` ($5 / $30 per 1M tok) + `claude-opus-4-7` ($15 / $75 per 1M tok) costs **$2–$10**. Ten runs a month → $20–$100 in API bills.
+- A single API run with `gpt-5.5` ($5 / $30 per 1M tok) + `claude-opus-4-7` ($15 / $75 per 1M tok) costs **$2–$10** in RUP mode. Ten runs a month → $20–$100 in API bills.
 - A Claude Pro subscription is ~$20/month flat. ChatGPT Plus is ~$20/month flat. **You already pay for these.** Running the architect against them is **$0 marginal cost.**
-- Trade-off: the CLI route is slower (5–15s per role × 11 roles = 1–3 min per pipeline run) and the model is whatever your subscription tier gives you. For the "boss handed me a feature, lay it out" use case, that's fine.
+- Trade-off: the CLI route is slower (5–15s per role) and the model is whatever your subscription tier gives you. For the "boss handed me a feature, lay it out" use case, that's fine.
+- Pair mode runs 2-3 roles → ~30-60s on small specs. RUP mode runs 11 roles → 1-3 min. Both are $0 on subscriptions.
 
 ### Prerequisites — install both CLIs and log in once
 
@@ -147,17 +179,20 @@ You can't, in this version. The HTTP-API providers were removed in favor of the 
 From the project where you want the `agents/<slug>/` folder created:
 
 ```bash
-# from a Markdown spec
+# pair mode (default — fast)
 p3x-architect docs/feature-x.md --name feature-x
 
-# inline text
-p3x-architect --text "Build a simple REST API for tasks with create/list/update/delete and a SQLite store" --name task-api
+# inline text in pair mode
+p3x-architect --text "Add a /healthz endpoint that returns 200 with the current git sha" --name healthz
 
-# pipe via stdin
+# pipe via stdin in pair mode
 cat requirement.md | p3x-architect --name nightly-report
 
-# tighten budget and rounds
-p3x-architect spec.md --name auth --budget 3 --max-rounds 1
+# RUP mode — full multi-agent design pipeline
+p3x-architect docs/big-redesign.md --name big-redesign --rup
+
+# RUP mode with tighter rounds
+p3x-architect spec.md --name auth --rup --max-rounds 1
 ```
 
 All flags:
@@ -168,7 +203,8 @@ All flags:
 | `-t, --text <s>` | inline requirement (alternative to a file) |
 | `-n, --name <slug>` | folder name under `agents/` (auto-derived if omitted) |
 | `-o, --output <dir>` | override output directory |
-| `-r, --max-rounds <n>` | maximum critic↔reviser rounds (default `2`) |
+| `--rup` | run the full RUP multi-agent design pipeline (default off → fast pair mode) |
+| `-r, --max-rounds <n>` | maximum critic↔reviser rounds (default `1` in pair mode, `2` in `--rup` mode) |
 | `-b, --budget <usd>` | cumulative USD budget across all roles (default `5`, `0` = unlimited) |
 | `--cwd <dir>` | project root for `agents/<slug>/` (defaults to `process.cwd()`) |
 
@@ -240,56 +276,59 @@ claude mcp add p3x-architect -- node /absolute/path/to/architect/bin/architect-m
 The MCP exposes one tool — `architect` — with these parameters:
 
 - `requirement` (required) — plain-language requirement
+- `rup` (optional, boolean) — set `true` to run the full RUP pipeline; default `false` = fast pair mode
 - `slug` (optional) — folder under `agents/`
 - `project_root` (optional) — absolute path; defaults to MCP server cwd
-- `max_rounds` (optional) — defaults to 2
+- `max_rounds` (optional) — default 1 in pair mode, 2 in RUP mode
 - `budget_usd` (optional) — defaults to `ARCHITECT_BUDGET_USD` or 5
 
-The tool blocks for 30–120 seconds while the pipeline runs. Returns a JSON summary with the verdict, file count, total cost, and per-role token usage.
+Pair mode blocks for ~30–60 seconds on small specs; RUP mode for 1–3 minutes. Returns a JSON summary with the pipeline mode, file count, total cost, and per-role token usage (verdict only in RUP mode).
 
 ## Cost & timing
 
 Because every role spawns your local `claude` / `codex` CLI, **runtime cost is $0** beyond your existing subscriptions. The `--budget` flag and `usd` fields in `pipeline.json` are kept for forward compatibility with an API-mode that may return later — they will all read `0` in CLI mode.
 
-Wall-clock time is dominated by `claude` startup (each invocation re-loads its tooling) plus inference latency. Expect:
+Wall-clock time is dominated by `claude` / `codex` startup (each invocation re-loads its tooling) plus inference latency. Expect:
 
 - 5–15 seconds per role
-- 1–3 minutes for the full 11-role pipeline on a small spec
-- 3–6 minutes on a large one with two critic↔reviser rounds
+- **Pair mode (default):** ~30–60s on a small spec (1 implement + 1 critic, optional 1 revise)
+- **RUP mode (`--rup`):** 1–3 minutes for the full 11-role pipeline on a small spec; 3–6 minutes on a large one with two critic↔reviser rounds
 
 You can dial down latency with:
 
 - `ANTHROPIC_MODEL=sonnet` (faster than opus, still strong)
-- `--max-rounds 1` (skip the second critic round)
+- `--max-rounds 0` is not allowed — set `--max-rounds 1` to keep just one critic pass with no revision in RUP mode (pair mode already defaults to 1)
+- Use the default pair mode unless the change genuinely needs the design dossier
 
 ## Project structure
 
 ```text
 src/
-  orchestrator.mjs       # the 4-phase pipeline, budget enforcement, output writing
+  orchestrator.mjs       # mode dispatcher (pair | rup), budget enforcement, output writing
   index.mjs              # public ESM entry — exports architect() and every role
   mcp.mjs                # MCP server (stdio transport)
+  scan-project.mjs       # walks the project root and embeds source content for the roles
   providers/
-    openai.mjs           # OpenAI client with structured outputs + cost tracking
-    anthropic.mjs        # Anthropic client with tool-use schemas + cost tracking
+    openai.mjs           # codex CLI subprocess with structured outputs
+    anthropic.mjs        # claude CLI subprocess with tool-use schemas
     schema.mjs           # Zod 4 → JSON Schema (strict, additionalProperties:false)
+    log-context.mjs      # AsyncLocalStorage for streaming sub-CLI output to the orchestrator
   roles/
-    vision.mjs                # Phase 1 — OpenAI
-    vision-reviewer.mjs       # Phase 1 — Claude
-    requirements-analyst.mjs  # Phase 2 — OpenAI
-    architect.mjs             # Phase 2 — Claude
-    risk-analyst.mjs          # Phase 2 — OpenAI
-    design-reviewer.mjs       # Phase 2 — Claude
-    implementer.mjs           # Phase 3 — Claude
-    critic.mjs                # Phase 3 — OpenAI
-    reviser.mjs               # Phase 3 — Claude
-    acceptance-writer.mjs     # Phase 4 — OpenAI
-    deployment-writer.mjs     # Phase 4 — Claude
+    pair-implementer.mjs      # pair mode — Claude (plan + every file in one call)
+    vision.mjs                # RUP Phase 1 — OpenAI
+    vision-reviewer.mjs       # RUP Phase 1 — Claude
+    requirements-analyst.mjs  # RUP Phase 2 — OpenAI
+    architect.mjs             # RUP Phase 2 — Claude
+    risk-analyst.mjs          # RUP Phase 2 — OpenAI
+    design-reviewer.mjs       # RUP Phase 2 — Claude
+    implementer.mjs           # RUP Phase 3 — Claude
+    critic.mjs                # both modes — OpenAI
+    reviser.mjs               # both modes — Claude
+    acceptance-writer.mjs     # RUP Phase 4 — OpenAI
+    deployment-writer.mjs     # RUP Phase 4 — Claude
 bin/
   architect.js            # CLI entry
   architect-mcp.js        # MCP server entry
-secure/
-  .env.example            # template — copy to .env or .env.architect
 example/
   spec.md                 # tiny CRUD spec for a first end-to-end run
 ```
@@ -299,21 +338,33 @@ example/
 ```js
 import { architect } from 'p3x-architect';
 
+// pair mode (default)
 const result = await architect({
-    requirement: 'Build a CRUD task API in Node.js with SQLite',
-    slug: 'task-api',
+    requirement: 'Add a /healthz endpoint that returns 200 with the current git sha',
+    slug: 'healthz',
     projectRoot: process.cwd(),
+    log: console.log,
+});
+
+console.log(result.pipelineMode);  // 'pair'
+console.log(result.files.length);
+console.log(result.usage.totalUsd);
+
+// RUP mode — full design pipeline
+const big = await architect({
+    requirement: 'Migrate the auth layer from session cookies to JWT...',
+    slug: 'auth-migration',
+    projectRoot: process.cwd(),
+    mode: 'rup',           // or pass rup: true
     maxRounds: 2,
     budgetUsd: 5,
     log: console.log,
 });
 
-console.log(result.verdict);       // ready-to-build | fix-then-build | redesign
-console.log(result.files.length);
-console.log(result.usage.totalUsd);
+console.log(big.verdict);          // ready-to-build | fix-then-build | redesign  (RUP mode only)
 ```
 
-Every role is also exported individually if you want to run a single phase.
+Every role is also exported individually if you want to run a single one.
 
 ## Homepage
 
@@ -381,7 +432,7 @@ All my domains, including [patrikx3.com](https://patrikx3.com), [corifeus.eu](ht
 **🚨 Important Changes:** Any breaking changes are prominently noted in the readme to keep you informed.
 
 
-[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.108
+[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.109
 
  [![NPM](https://img.shields.io/npm/v/p3x-architect.svg)](https://www.npmjs.com/package/p3x-architect)  [![Donate for PatrikX3 / P3X](https://img.shields.io/badge/Donate-PatrikX3-003087.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QZVM4V6HVZJW6)  [![Contact Corifeus / P3X](https://img.shields.io/badge/Contact-P3X-ff9900.svg)](https://www.patrikx3.com/en/front/contact) [![Like Corifeus @ Facebook](https://img.shields.io/badge/LIKE-Corifeus-3b5998.svg)](https://www.facebook.com/corifeus.software)
 

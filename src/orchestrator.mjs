@@ -12,6 +12,7 @@ import criticRole from './roles/critic.mjs';
 import reviserRole from './roles/reviser.mjs';
 import acceptanceWriterRole from './roles/acceptance-writer.mjs';
 import deploymentWriterRole from './roles/deployment-writer.mjs';
+import pairImplementerRole from './roles/pair-implementer.mjs';
 import { logStore, subLogFlush } from './providers/log-context.mjs';
 import { scanProject } from './scan-project.mjs';
 
@@ -59,22 +60,33 @@ export async function architect(opts) {
     const ctx = { log, buffer: '' };
     return logStore.run(ctx, async () => {
         try {
-            return await runArchitect(opts, log);
+            const mode = resolveMode(opts);
+            if (mode === 'rup') {
+                return await runRupArchitect(opts, log);
+            }
+            return await runPairArchitect(opts, log);
         } finally {
             subLogFlush();
         }
     });
 }
 
-async function runArchitect({
+// Default is "pair" (Claude implements + Codex critiques, optional Claude revise).
+// Opt into "rup" by passing { mode: 'rup' } or { rup: true }.
+function resolveMode(opts) {
+    if (opts.mode === 'rup' || opts.mode === 'pair') return opts.mode;
+    if (opts.rup === true) return 'rup';
+    return 'pair';
+}
+
+async function setupRun({
     spec: specInput,
     specPath,
     requirement,
     slug,
     outputDir,
     projectRoot,
-    maxRounds = 2,
-    budgetUsd = 5,
+    budgetUsd,
 }, log) {
     const requirementText = requirement
         ?? specInput
@@ -92,20 +104,6 @@ async function runArchitect({
     }
     await ensureDir(baseDir);
 
-    const dirs = {
-        inception: path.join(baseDir, 'inception'),
-        elaboration: path.join(baseDir, 'elaboration'),
-        construction: path.join(baseDir, 'construction'),
-        transition: path.join(baseDir, 'transition'),
-    };
-    for (const d of Object.values(dirs)) await ensureDir(d);
-    // NOTE: no nested construction/project/ folder anymore. Code is written
-    // directly to `root` — either creating a greenfield project or modifying an
-    // existing one in place. agents/<slug>/construction/ keeps the design dossier
-    // (issues-round-N.json, changes manifest) but never duplicates the source tree.
-
-    // Scan the existing project so the architect/implementer/reviser can either
-    // recognise an empty root (greenfield) or modify in place.
     log(`[scan] reading project root: ${root}`);
     const scan = await scanProject(root);
     log(`[scan] ${scan.files.length} files, ${(scan.totalBytes / 1024).toFixed(1)} KB${scan.truncated ? ' (truncated to fit limits)' : ''}, hasCode=${scan.hasCode}`);
@@ -127,10 +125,6 @@ async function runArchitect({
         }
     };
 
-    // Wraps every role call so we get start, finish, elapsed-ms, and (via the
-    // log-context AsyncLocalStorage) every line of sub-CLI output in between.
-    // Effect: a typical pipeline emits ~50–100 log lines instead of ~22, so the
-    // user always sees something fresh during a long run.
     const runRole = async (label, provider, fn) => {
         const t0 = Date.now();
         log(`[${label}] start (${provider})`);
@@ -141,7 +135,215 @@ async function runArchitect({
         return result;
     };
 
-    log(`[pipeline] start — slug=${slug ?? '(none)'}, output=${baseDir}`);
+    return {
+        requirementText,
+        root,
+        baseDir,
+        scan,
+        startedAt,
+        runRole,
+        getCumulativeUsd: () => cumulativeUsd,
+        usageLog,
+    };
+}
+
+// ==============================================================
+// PAIR mode (default) — Claude implements + Codex critiques (+optional Claude revise).
+// 2-3 AI calls instead of 11. Wall-clock target: ~30-60s on small specs.
+// ==============================================================
+
+async function runPairArchitect(opts, log) {
+    const {
+        slug,
+        maxRounds = 1,
+        budgetUsd = 5,
+    } = opts;
+
+    const setup = await setupRun({ ...opts, budgetUsd }, log);
+    const { requirementText, root, baseDir, scan, startedAt, runRole, usageLog } = setup;
+
+    log(`[pipeline] start (pair mode) — slug=${slug ?? '(none)'}, output=${baseDir}`);
+
+    // ---- Step 1: Claude pair-implementer (plan + every file in one call) ----
+    const impl = await runRole('pair-implementer', 'Claude',
+        () => pairImplementerRole({
+            requirement: requirementText,
+            existingFiles: scan.files,
+            existingPaths: scan.paths,
+        }));
+
+    let files = impl.files;
+    const createCount = files.filter((f) => f.mode === 'create').length;
+    const modifyCount = files.filter((f) => f.mode === 'modify').length;
+    log(`[pair-implementer] plan + ${files.length} files (${createCount} create, ${modifyCount} modify)`);
+    await writeFile(path.join(baseDir, 'plan.md'), impl.plan);
+    await writeProjectFiles(root, files, log);
+
+    // ---- Step 2..N: Codex critic, Claude reviser (until clean or maxRounds) ----
+    let lastIssues = [];
+    for (let round = 1; round <= maxRounds; round += 1) {
+        const review = await runRole(`critic-r${round}`, 'OpenAI/codex',
+            () => criticRole({
+                spec: requirementText,
+                requirements: [],
+                architecture: impl.plan,
+                files,
+            }));
+        lastIssues = review.issues;
+        await writeJson(path.join(baseDir, `issues-round-${round}.json`), review.issues);
+
+        const blocking = review.issues.filter(isBlocking);
+        log(`[critic-r${round}] ${review.issues.length} issues, ${blocking.length} blocking`);
+
+        if (blocking.length === 0) {
+            log(`[critic-r${round}] no blocking issues — stopping critic loop`);
+            break;
+        }
+        if (round >= maxRounds) {
+            log(`[critic-r${round}] max rounds reached, ${blocking.length} blocking issues remain`);
+            break;
+        }
+
+        const rev = await runRole(`reviser-r${round}`, 'Claude',
+            () => reviserRole({ spec: requirementText, files, issues: review.issues }));
+        files = mergeFiles(files, rev.files);
+        await writeProjectFiles(root, rev.files, log);
+        log(`[reviser-r${round}] revised ${rev.files.length} files`);
+    }
+
+    const changesManifest = {
+        projectRoot: root,
+        mode: scan.hasCode ? 'modify-in-place' : 'greenfield',
+        existingFilesScanned: scan.files.length,
+        created: files.filter((f) => f.mode === 'create').map((f) => f.path).sort(),
+        modified: files.filter((f) => f.mode === 'modify').map((f) => f.path).sort(),
+    };
+    await writeJson(path.join(baseDir, 'changes.json'), changesManifest);
+
+    const finishedAt = new Date();
+    const elapsedSec = ((finishedAt - startedAt) / 1000).toFixed(1);
+    const cumulativeUsd = setup.getCumulativeUsd();
+    const remainingBlocking = lastIssues.filter(isBlocking).length;
+
+    const readme = renderPairReadme({
+        slug,
+        requirement: requirementText,
+        startedAt,
+        finishedAt,
+        elapsedSec,
+        cumulativeUsd,
+        fileCount: files.length,
+        createdCount: changesManifest.created.length,
+        modifiedCount: changesManifest.modified.length,
+        mode: changesManifest.mode,
+        projectRoot: root,
+        roundsRun: usageLog.filter((u) => u.role.startsWith('critic-r')).length,
+        remainingBlocking,
+    });
+    await writeFile(path.join(baseDir, 'README.md'), readme);
+
+    await writeJson(path.join(baseDir, 'pipeline.json'), {
+        slug,
+        pipelineMode: 'pair',
+        startedAt: startedAt.toISOString(),
+        finishedAt: finishedAt.toISOString(),
+        elapsedSec: Number(elapsedSec),
+        totalUsd: cumulativeUsd,
+        projectRoot: root,
+        mode: changesManifest.mode,
+        fileCount: files.length,
+        created: changesManifest.created,
+        modified: changesManifest.modified,
+        remainingBlockingIssues: remainingBlocking,
+        roles: usageLog,
+    });
+
+    log(`[done] pair mode — $${cumulativeUsd.toFixed(4)} in ${elapsedSec}s — design: ${baseDir}, code: ${root}`);
+
+    return {
+        baseDir,
+        projectRoot: root,
+        files,
+        created: changesManifest.created,
+        modified: changesManifest.modified,
+        mode: changesManifest.mode,
+        verdict: remainingBlocking === 0 ? 'ready-to-build' : 'fix-then-build',
+        issues: lastIssues,
+        pipelineMode: 'pair',
+        usage: { totalUsd: cumulativeUsd, perRole: usageLog },
+    };
+}
+
+function renderPairReadme({ slug, requirement, startedAt, finishedAt, elapsedSec, cumulativeUsd, fileCount, createdCount, modifiedCount, mode, projectRoot, roundsRun, remainingBlocking }) {
+    const reqExcerpt = requirement.length > 400 ? `${requirement.slice(0, 400)}…` : requirement;
+    return `# ${slug ?? 'architect output'}
+
+> Generated by p3x-architect — **pair mode** (Claude implements + Codex critiques).
+> The actual code was written / modified directly under the project root: \`${projectRoot}\`.
+> Review it with \`git diff\`. For a full RUP design dossier, re-run with \`--rup\`.
+
+## Original requirement
+
+\`\`\`
+${reqExcerpt}
+\`\`\`
+
+## Pipeline summary
+
+| Field | Value |
+| --- | --- |
+| Pipeline mode | **pair** (fast, 2-3 calls) |
+| Started | ${startedAt.toISOString()} |
+| Finished | ${finishedAt.toISOString()} |
+| Elapsed | ${elapsedSec}s |
+| Total cost | \$${cumulativeUsd.toFixed(4)} |
+| Mode | **${mode}** |
+| Files touched | ${fileCount} (${createdCount} created, ${modifiedCount} modified) |
+| Critic rounds | ${roundsRun} |
+| Remaining blocking issues | ${remainingBlocking} |
+
+## Outputs
+
+- [plan.md](plan.md) — Claude's plan / rationale (greenfield vs modify, layout choices, what each file does)
+- [changes.json](changes.json) — manifest of created vs. modified files at the project root
+- \`issues-round-N.json\` — codex critic findings per round
+
+## Next steps
+
+1. \`git status\` / \`git diff\` at the project root — review every file the pair touched.
+2. Read [plan.md](plan.md) to confirm Claude understood the requirement.
+3. If you need a deeper design dossier (vision, requirements, architecture, risks, acceptance, deploy), re-run with \`--rup\`.
+
+## Pipeline metadata
+
+See [pipeline.json](pipeline.json) for full per-role token usage, cost, and the same created/modified manifest.
+`;
+}
+
+// ==============================================================
+// RUP mode (--rup) — full 11-role, 4-phase pipeline. Use this when designing
+// something complex enough to warrant the design dossier.
+// ==============================================================
+
+async function runRupArchitect(opts, log) {
+    const {
+        slug,
+        maxRounds = 2,
+        budgetUsd = 5,
+    } = opts;
+
+    const setup = await setupRun({ ...opts, budgetUsd }, log);
+    const { requirementText, root, baseDir, scan, startedAt, runRole, usageLog } = setup;
+
+    const dirs = {
+        inception: path.join(baseDir, 'inception'),
+        elaboration: path.join(baseDir, 'elaboration'),
+        construction: path.join(baseDir, 'construction'),
+        transition: path.join(baseDir, 'transition'),
+    };
+    for (const d of Object.values(dirs)) await ensureDir(d);
+
+    log(`[pipeline] start (rup mode) — slug=${slug ?? '(none)'}, output=${baseDir}`);
 
     // ==================== Phase 1: Inception ====================
     log('[phase] 1/4 inception');
@@ -243,9 +445,6 @@ async function runArchitect({
         log(`[reviser-r${round}] revised ${rev.files.length} files`);
     }
 
-    // Persist a manifest of every file the construction phase touched, separating
-    // creations from modifications. This is the user-facing "what changed" summary
-    // — the actual code is in the project root, reviewable via `git diff`.
     const changesManifest = {
         projectRoot: root,
         mode: scan.hasCode ? 'modify-in-place' : 'greenfield',
@@ -279,8 +478,9 @@ async function runArchitect({
     // ==================== Top-level README ====================
     const finishedAt = new Date();
     const elapsedSec = ((finishedAt - startedAt) / 1000).toFixed(1);
+    const cumulativeUsd = setup.getCumulativeUsd();
     const remainingBlocking = lastIssues.filter(isBlocking).length;
-    const readme = renderReadme({
+    const readme = renderRupReadme({
         slug,
         requirement: requirementText,
         startedAt,
@@ -300,6 +500,7 @@ async function runArchitect({
 
     await writeJson(path.join(baseDir, 'pipeline.json'), {
         slug,
+        pipelineMode: 'rup',
         startedAt: startedAt.toISOString(),
         finishedAt: finishedAt.toISOString(),
         elapsedSec: Number(elapsedSec),
@@ -314,7 +515,7 @@ async function runArchitect({
         roles: usageLog,
     });
 
-    log(`[done] $${cumulativeUsd.toFixed(4)} in ${elapsedSec}s — design: ${baseDir}, code: ${root}`);
+    log(`[done] rup mode — $${cumulativeUsd.toFixed(4)} in ${elapsedSec}s — design: ${baseDir}, code: ${root}`);
 
     return {
         baseDir,
@@ -325,15 +526,16 @@ async function runArchitect({
         mode: changesManifest.mode,
         verdict: designReview.verdict,
         issues: lastIssues,
+        pipelineMode: 'rup',
         usage: { totalUsd: cumulativeUsd, perRole: usageLog },
     };
 }
 
-function renderReadme({ slug, requirement, startedAt, finishedAt, elapsedSec, cumulativeUsd, verdict, fileCount, createdCount, modifiedCount, mode, projectRoot, roundsRun, remainingBlocking }) {
+function renderRupReadme({ slug, requirement, startedAt, finishedAt, elapsedSec, cumulativeUsd, verdict, fileCount, createdCount, modifiedCount, mode, projectRoot, roundsRun, remainingBlocking }) {
     const reqExcerpt = requirement.length > 400 ? `${requirement.slice(0, 400)}…` : requirement;
     return `# ${slug ?? 'architect output'}
 
-> Generated by p3x-architect — multi-agent RUP pipeline (OpenAI + Claude).
+> Generated by p3x-architect — **RUP mode** (multi-agent pipeline, OpenAI + Claude).
 > The design dossier lives in this folder. The actual code was written / modified
 > directly under the project root: \`${projectRoot}\`. Review it with \`git diff\`.
 
@@ -347,6 +549,7 @@ ${reqExcerpt}
 
 | Field | Value |
 | --- | --- |
+| Pipeline mode | **rup** (full 4-phase, 11 roles) |
 | Started | ${startedAt.toISOString()} |
 | Finished | ${finishedAt.toISOString()} |
 | Elapsed | ${elapsedSec}s |

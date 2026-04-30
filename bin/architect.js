@@ -28,12 +28,13 @@ const program = new Command();
 
 program
     .name('p3x-architect')
-    .description('Multi-agent RUP pipeline (OpenAI + Claude). Writes/edits code at the project root in place; design dossier goes under agents/<slug>/.')
+    .description('Pair-programming AI (Claude + Codex) by default — fast 2-3 calls. Add --rup for the full multi-agent RUP design pipeline. Writes/edits code at the project root in place; design artifacts go under agents/<slug>/.')
     .argument('[input]', 'path to a Markdown file containing the requirement (or omit to use --text or stdin)')
     .option('-t, --text <requirement>', 'inline requirement text (alternative to a file)')
     .option('-n, --name <slug>', 'feature slug (folder name under agents/) — derived from input filename if omitted')
     .option('-o, --output <dir>', 'override the output directory (default: <cwd>/agents/<slug>)')
-    .option('-r, --max-rounds <n>', 'maximum critic↔reviser rounds in Construction', (v) => Number(v), 2)
+    .option('--rup', 'run the full RUP multi-agent pipeline (vision → requirements → architecture → risks → design review → implement → critic → revise → acceptance → deploy). Default is the fast pair mode.')
+    .option('-r, --max-rounds <n>', 'maximum critic↔reviser rounds (default 1 in pair mode, 2 in --rup mode)', (v) => Number(v))
     .option('-b, --budget <usd>', 'cumulative USD budget; 0 = unlimited', (v) => Number(v), 5)
     .option('--cwd <dir>', 'project root for the agents/<slug>/ output (defaults to current dir)')
     .action(async (input, opts) => {
@@ -61,6 +62,9 @@ program
 
         const slug = opts.name ?? (derivedName ? slugify(derivedName) : slugify(requirement.slice(0, 40)));
         const cwd = opts.cwd ?? process.cwd();
+        const mode = opts.rup ? 'rup' : 'pair';
+        const defaultRounds = mode === 'rup' ? 2 : 1;
+        const maxRounds = opts.maxRounds ?? defaultRounds;
 
         try {
             const result = await architect({
@@ -68,13 +72,14 @@ program
                 slug,
                 outputDir: opts.output,
                 projectRoot: cwd,
-                maxRounds: opts.maxRounds,
+                mode,
+                maxRounds,
                 budgetUsd: opts.budget,
                 log: (msg) => console.log(msg),
             });
             console.log('');
-            console.log(`✔ done — ${result.baseDir}`);
-            console.log(`  verdict: ${result.verdict}`);
+            console.log(`✔ done (${result.pipelineMode} mode) — ${result.baseDir}`);
+            if (result.verdict) console.log(`  verdict: ${result.verdict}`);
             console.log(`  files:   ${result.files.length}`);
             console.log(`  cost:    $${result.usage.totalUsd.toFixed(4)}`);
         } catch (err) {
