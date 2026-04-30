@@ -6,7 +6,7 @@
 
 
 
-# 📐 Multi-agent RUP pipeline — OpenAI + Claude take a requirement through Inception → Elaboration → Construction → Transition and emit a complete design + implementation under agents/slug/ v2026.4.103
+# 📐 Multi-agent RUP pipeline — OpenAI + Claude take a requirement through Inception → Elaboration → Construction → Transition and emit a complete design + implementation under agents/slug/ v2026.4.104
 
 
   
@@ -115,7 +115,7 @@ yarn global add p3x-architect
 npm install -g p3x-architect
 ```
 
-Or, if you don't want a global install, the MCP entry works fine on-demand via `npx -y p3x-architect-mcp`.
+If you don't want a global install, the MCP entry works on-demand via `npx -y -p p3x-architect p3x-architect-mcp` — `npx` pulls the `p3x-architect` package and runs its `p3x-architect-mcp` bin. **There is no separate `p3x-architect-mcp` package on npm**; both binaries ship inside `p3x-architect`.
 
 ### Model selection
 
@@ -162,27 +162,67 @@ All flags:
 
 ## MCP usage (Claude Code, Cursor, VS Code, …)
 
-`p3x-architect-mcp` exposes the pipeline as a single Model Context Protocol tool, so you can run it from any MCP-compatible AI assistant.
+The `p3x-architect` package ships **two binaries**:
 
-### Claude Code
+| Binary | Purpose |
+| --- | --- |
+| `p3x-architect` | the CLI you saw above |
+| `p3x-architect-mcp` | a Model Context Protocol server (stdio) that exposes the pipeline as a single `architect` tool |
+
+Both live in the same package — there is no separate `p3x-architect-mcp` package. Wherever the docs below say `npx -y -p p3x-architect p3x-architect-mcp`, the `-p` flag tells `npx` "install the `p3x-architect` package, then run the `p3x-architect-mcp` bin from it."
+
+### Claude Code (terminal **or** VS Code extension)
+
+The Anthropic `claude` CLI and the **Claude Code VS Code extension** share the same MCP registry (`~/.claude.json`), so a single `claude mcp add` invocation registers the server for both. Run it once from any terminal:
 
 ```bash
-claude mcp add p3x-architect -- npx -y p3x-architect-mcp
+# global install — short form
+yarn global add p3x-architect
+claude mcp add p3x-architect -- p3x-architect-mcp
+
+# no global install — npx runs it on demand
+claude mcp add p3x-architect -- npx -y -p p3x-architect p3x-architect-mcp
+
+# per-workspace registration (lives in .mcp.json next to your project, scoped to that repo)
+claude mcp add --scope project p3x-architect -- npx -y -p p3x-architect p3x-architect-mcp
 ```
 
-Then in any conversation: *"Use p3x-architect to plan and implement this feature: …"*
+Restart the Claude Code panel in VS Code (or re-open the chat in the terminal) and the `architect` tool will appear in the tool list. Then ask: *"Use p3x-architect to plan and implement this feature: …"*
 
-### Configure in MCP-compatible clients (generic)
+### VS Code native MCP (no Claude Code extension)
+
+VS Code 1.95+ ships native MCP support for any MCP-aware extension. Add the file `.vscode/mcp.json` at your workspace root:
 
 ```json
 {
-  "mcpServers": {
-    "p3x-architect": {
-      "command": "npx",
-      "args": ["-y", "p3x-architect-mcp"]
+    "servers": {
+        "p3x-architect": {
+            "command": "npx",
+            "args": ["-y", "-p", "p3x-architect", "p3x-architect-mcp"]
+        }
     }
-  }
 }
+```
+
+### Generic MCP clients (Cursor, Continue, Zed, …)
+
+```json
+{
+    "mcpServers": {
+        "p3x-architect": {
+            "command": "npx",
+            "args": ["-y", "-p", "p3x-architect", "p3x-architect-mcp"]
+        }
+    }
+}
+```
+
+### Local (unpublished) testing
+
+If you cloned this repo and want to drive the MCP from VS Code Claude Code without publishing first, point at the local bin directly:
+
+```bash
+claude mcp add p3x-architect -- node /absolute/path/to/architect/bin/architect-mcp.js
 ```
 
 The MCP exposes one tool — `architect` — with these parameters:
@@ -329,7 +369,7 @@ All my domains, including [patrikx3.com](https://patrikx3.com), [corifeus.eu](ht
 **🚨 Important Changes:** Any breaking changes are prominently noted in the readme to keep you informed.
 
 
-[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.103
+[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.104
 
  [![NPM](https://img.shields.io/npm/v/p3x-architect.svg)](https://www.npmjs.com/package/p3x-architect)  [![Donate for PatrikX3 / P3X](https://img.shields.io/badge/Donate-PatrikX3-003087.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QZVM4V6HVZJW6)  [![Contact Corifeus / P3X](https://img.shields.io/badge/Contact-P3X-ff9900.svg)](https://www.patrikx3.com/en/front/contact) [![Like Corifeus @ Facebook](https://img.shields.io/badge/LIKE-Corifeus-3b5998.svg)](https://www.facebook.com/corifeus.software)
 

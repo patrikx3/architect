@@ -1,6 +1,6 @@
 {
     "name": "p3x-architect",
-    "version": "2026.4.103",
+    "version": "2026.4.104",
     "corifeus": {
         "icon": "fas fa-drafting-compass",
         "icon-utf8": "📐",
@@ -62,7 +62,7 @@
         "commander": "^14.0.3",
         "fs-extra": "^11.3.4",
         "openai": "^6.35.0",
-        "zod": "^4.3.6"
+        "zod": "^4.4.1"
     },
     "devDependencies": {
         "corifeus-builder": "^2026.4.157"
