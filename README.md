@@ -6,7 +6,7 @@
 
 
 
-# 📐 P3X Architect - Multi-agent RUP pipeline — OpenAI + Claude take a requirement through Inception → Elaboration → Construction → Transition and emit a complete design + implementation under agents/slug/ v2026.4.106
+# 📐 P3X Architect - Multi-agent RUP pipeline — OpenAI + Claude take a requirement through Inception → Elaboration → Construction → Transition and emit a complete design + implementation under agents/slug/ v2026.4.107
 
 
   
@@ -36,7 +36,9 @@ v24.15.0
 
 A multi-agent **RUP** (Rational Unified Process) pipeline for software design — driven by your **Claude Code + ChatGPT subscriptions** (no API keys, no per-call cost).
 
-You hand it a one-paragraph requirement from a stakeholder. It hands you back a complete design dossier and a working implementation under `agents/<slug>/` — produced by **eleven role-played AI agents** that alternate between OpenAI (via `codex` CLI) and Claude (via `claude` CLI) across the four classic RUP phases:
+You hand it a one-paragraph requirement from a stakeholder. It scans the project root, decides whether you're greenfield or extending an existing codebase, and either **creates a new project at the root** or **modifies the existing files in place** — matching your existing layout (`src/`, `src-server/`, `client/`, `server/`, monorepo workspaces, …). The design dossier (vision, requirements, architecture, risks, acceptance, deploy) lands under `agents/<slug>/` for review; the actual code goes where it would normally live.
+
+The work is done by **eleven role-played AI agents** that alternate between OpenAI (via `codex` CLI) and Claude (via `claude` CLI) across the four classic RUP phases:
 
 | Phase | Roles | Provider chain |
 | --- | --- | --- |
@@ -47,30 +49,40 @@ You hand it a one-paragraph requirement from a stakeholder. It hands you back a 
 
 Each phase's outputs feed the next. The cross-provider chain catches blind spots a single model would miss — when OpenAI writes the requirements, Claude reviews them; when Claude writes the architecture, OpenAI flags the risks; when Claude implements, OpenAI critiques.
 
-## What you get under `agents/<slug>/`
+## What you get
+
+The pipeline writes to **two places**:
+
+1. **The project root itself** — actual code. Greenfield projects get a fresh tree at the root; existing codebases get in-place edits matching their layout. Review it with `git diff`.
+2. **`agents/<slug>/`** — the design dossier (vision, requirements, architecture, risks, acceptance, deploy) plus a `changes.json` manifest of every path created vs. modified.
 
 ```text
-agents/<slug>/
-  README.md                  # navigation summary, cost, verdict, links to outputs
-  pipeline.json              # per-role token usage + timing
-  inception/
-    vision.md
-    vision-review-notes.md
-  elaboration/
-    requirements.json        # structured, MoSCoW-prioritized
-    architecture.md
-    file_tree.json
-    risks.md
-    design-review.md         # reviewer's prose review
-    design-findings.json     # specific gaps + verdict
-  construction/
-    issues-round-1.json
-    issues-round-2.json      # if a 2nd round was needed
-    project/                 # the actual generated source code
-  transition/
-    acceptance.md            # test scenarios + manual checklist
-    deploy.md                # local + production deploy + ops runbook
+<project root>/                # ← actual code lands here in place
+  ...your existing files (modified in place)...
+  ...new files (created next to their existing siblings)...
+  agents/<slug>/                # ← design dossier only, no nested project copy
+    README.md                   # navigation summary, mode (greenfield|modify-in-place), file counts, verdict
+    pipeline.json               # per-role token usage + timing + created/modified paths
+    inception/
+      vision.md
+      vision-review-notes.md
+    elaboration/
+      requirements.json         # structured, MoSCoW-prioritized
+      architecture.md
+      file_tree.json            # each entry has mode: "create" | "modify" + change_notes
+      risks.md
+      design-review.md          # reviewer's prose review
+      design-findings.json      # specific gaps + verdict
+    construction/
+      changes.json              # { created: [...], modified: [...] } at the project root
+      issues-round-1.json       # critic findings per round
+      issues-round-2.json
+    transition/
+      acceptance.md             # test scenarios + manual checklist
+      deploy.md                 # local + production deploy + ops runbook
 ```
+
+The architect role studies your existing folder layout (`src/`, `src-server/`, `client/server/`, monorepo workspaces, …) before deciding where new files go. New backend code lands next to existing backend code; new frontend code next to the frontend; new admin endpoints next to existing admin endpoints. **No nested `construction/project/` copy of your repo any more.**
 
 ## Cheapest path: subscriptions, not API keys
 
@@ -369,7 +381,7 @@ All my domains, including [patrikx3.com](https://patrikx3.com), [corifeus.eu](ht
 **🚨 Important Changes:** Any breaking changes are prominently noted in the readme to keep you informed.
 
 
-[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.106
+[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.107
 
  [![NPM](https://img.shields.io/npm/v/p3x-architect.svg)](https://www.npmjs.com/package/p3x-architect)  [![Donate for PatrikX3 / P3X](https://img.shields.io/badge/Donate-PatrikX3-003087.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QZVM4V6HVZJW6)  [![Contact Corifeus / P3X](https://img.shields.io/badge/Contact-P3X-ff9900.svg)](https://www.patrikx3.com/en/front/contact) [![Like Corifeus @ Facebook](https://img.shields.io/badge/LIKE-Corifeus-3b5998.svg)](https://www.facebook.com/corifeus.software)
 

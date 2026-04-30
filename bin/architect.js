@@ -28,7 +28,7 @@ const program = new Command();
 
 program
     .name('p3x-architect')
-    .description('Multi-agent RUP pipeline (OpenAI + Claude) — generates a full design and an implementation under agents/<slug>/.')
+    .description('Multi-agent RUP pipeline (OpenAI + Claude). Writes/edits code at the project root in place; design dossier goes under agents/<slug>/.')
     .argument('[input]', 'path to a Markdown file containing the requirement (or omit to use --text or stdin)')
     .option('-t, --text <requirement>', 'inline requirement text (alternative to a file)')
     .option('-n, --name <slug>', 'feature slug (folder name under agents/) — derived from input filename if omitted')

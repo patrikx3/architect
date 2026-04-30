@@ -20,7 +20,7 @@ const server = new McpServer(
     {
         capabilities: { logging: {} },
         instructions:
-            'P3X Architect MCP — multi-agent RUP pipeline. Calls OpenAI + Claude through Inception → Elaboration → Construction → Transition, generating a full design and implementation under agents/<slug>/. Use the architect tool with a plain-language requirement; pipeline runs may take 30s–several minutes and stream live progress via notifications/message + notifications/progress.',
+            'P3X Architect MCP — multi-agent RUP pipeline. Calls OpenAI + Claude through Inception → Elaboration → Construction → Transition. Writes/edits code in place at the project root (greenfield if empty, modify-existing-codebase otherwise) and saves the design dossier under agents/<slug>/. Pipeline runs may take 30s–several minutes and stream live progress via notifications/message + notifications/progress.',
     },
 );
 
@@ -29,7 +29,7 @@ server.registerTool(
     {
         title: 'Architect — multi-agent RUP pipeline',
         description:
-            'Generate a full design (vision, requirements, architecture, file_tree, risks, design review) and a code implementation (with critic↔reviser rounds) plus acceptance + deployment docs, all under <project_root>/agents/<slug>/. Uses OpenAI + Claude. Slow (30–120s) and not cheap (~$1–$5 per run with default models).',
+            'Generate a full design (vision, requirements, architecture, file_tree, risks, design review) and apply the implementation directly to <project_root>: greenfield projects get a fresh tree, existing codebases get in-place edits matching their layout (src/, src-server/, client/server/, monorepo, …). Critic↔reviser rounds tighten the result; acceptance + deployment docs land under <project_root>/agents/<slug>/. Uses OpenAI + Claude. Subscription mode = $0 marginal cost, ~30s–several minutes wall-clock.',
         inputSchema: {
             requirement: z
                 .string()
@@ -41,7 +41,7 @@ server.registerTool(
             project_root: z
                 .string()
                 .optional()
-                .describe('Absolute path to the target project root (output goes to <project_root>/agents/<slug>/). Defaults to the MCP server cwd.'),
+                .describe('Absolute path to the target project root. Code is created/modified in place here; the design dossier lands under <project_root>/agents/<slug>/. Defaults to the MCP server cwd.'),
             max_rounds: z
                 .number()
                 .int()

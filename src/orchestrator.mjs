@@ -13,16 +13,34 @@ import reviserRole from './roles/reviser.mjs';
 import acceptanceWriterRole from './roles/acceptance-writer.mjs';
 import deploymentWriterRole from './roles/deployment-writer.mjs';
 import { logStore, subLogFlush } from './providers/log-context.mjs';
+import { scanProject } from './scan-project.mjs';
 
 const { ensureDir, writeFile, readFile, remove, pathExists } = fsExtra;
 
 const isBlocking = (issue) => issue.severity === 'high' || issue.severity === 'medium';
 
-const writeProjectFiles = async (projectDir, files) => {
+// Resolve a tree-relative path against projectRoot, blocking absolute paths and
+// any '..' component so the AI cannot escape projectRoot. Throws on violations.
+const resolveSafe = (projectRoot, relPath) => {
+    if (!relPath || typeof relPath !== 'string') {
+        throw new Error(`bad file path from role: ${relPath}`);
+    }
+    if (path.isAbsolute(relPath)) {
+        throw new Error(`refusing absolute path from role: ${relPath}`);
+    }
+    const normalized = path.normalize(relPath);
+    if (normalized.split(/[\\/]/).includes('..')) {
+        throw new Error(`refusing path that escapes project root: ${relPath}`);
+    }
+    return path.join(projectRoot, normalized);
+};
+
+const writeProjectFiles = async (projectRoot, files, log) => {
     for (const file of files) {
-        const target = path.join(projectDir, file.path);
+        const target = resolveSafe(projectRoot, file.path);
         await ensureDir(path.dirname(target));
         await writeFile(target, file.content);
+        log?.(`  ↳ wrote ${file.mode === 'modify' ? 'modify' : 'create'}: ${file.path}`);
     }
 };
 
@@ -81,8 +99,21 @@ async function runArchitect({
         transition: path.join(baseDir, 'transition'),
     };
     for (const d of Object.values(dirs)) await ensureDir(d);
-    const projectDir = path.join(dirs.construction, 'project');
-    await ensureDir(projectDir);
+    // NOTE: no nested construction/project/ folder anymore. Code is written
+    // directly to `root` — either creating a greenfield project or modifying an
+    // existing one in place. agents/<slug>/construction/ keeps the design dossier
+    // (issues-round-N.json, changes manifest) but never duplicates the source tree.
+
+    // Scan the existing project so the architect/implementer/reviser can either
+    // recognise an empty root (greenfield) or modify in place.
+    log(`[scan] reading project root: ${root}`);
+    const scan = await scanProject(root);
+    log(`[scan] ${scan.files.length} files, ${(scan.totalBytes / 1024).toFixed(1)} KB${scan.truncated ? ' (truncated to fit limits)' : ''}, hasCode=${scan.hasCode}`);
+    if (scan.hasCode) {
+        log('[scan] mode: modify-in-place — roles will see existing code and only change what the feature needs');
+    } else {
+        log('[scan] mode: greenfield — roles will create a new project at the root');
+    }
 
     const startedAt = new Date();
     let cumulativeUsd = 0;
@@ -132,10 +163,17 @@ async function runArchitect({
     await writeJson(path.join(dirs.elaboration, 'requirements.json'), reqs.requirements);
 
     const arch = await runRole('architect', 'Claude',
-        () => architectRole({ vision, requirements: reqs.requirements }));
+        () => architectRole({
+            vision,
+            requirements: reqs.requirements,
+            existingFiles: scan.files,
+            existingPaths: scan.paths,
+        }));
     await writeFile(path.join(dirs.elaboration, 'architecture.md'), arch.architecture);
     await writeJson(path.join(dirs.elaboration, 'file_tree.json'), arch.fileTree);
-    log(`[architect] file tree: ${arch.fileTree.length} files`);
+    const createCount = arch.fileTree.filter((e) => e.mode === 'create').length;
+    const modifyCount = arch.fileTree.filter((e) => e.mode === 'modify').length;
+    log(`[architect] file tree: ${arch.fileTree.length} entries (${createCount} create, ${modifyCount} modify)`);
 
     const risk = await runRole('risk-analyst', 'OpenAI/codex',
         () => riskAnalystRole({ vision, requirements: reqs.requirements, architecture: arch.architecture }));
@@ -158,17 +196,18 @@ async function runArchitect({
     log('[phase] 2/4 elaboration complete');
 
     // ==================== Phase 3: Construction ====================
-    log(`[phase] 3/4 construction (${arch.fileTree.length} files to generate)`);
+    log(`[phase] 3/4 construction (${arch.fileTree.length} entries — ${createCount} create / ${modifyCount} modify, target=${root})`);
     const impl = await runRole('implementer', 'Claude',
         () => implementerRole({
             spec: vision,
             requirements: reqs.requirements,
             architecture: arch.architecture,
             fileTree: arch.fileTree,
+            existingFiles: scan.files,
         }));
     let files = impl.files;
-    await writeProjectFiles(projectDir, files);
-    log(`[implementer] wrote ${files.length} files to ${projectDir}`);
+    await writeProjectFiles(root, files, log);
+    log(`[implementer] applied ${files.length} files to ${root}`);
 
     let lastIssues = [];
     for (let round = 1; round <= maxRounds; round += 1) {
@@ -200,9 +239,21 @@ async function runArchitect({
         const rev = await runRole(`reviser-r${round}`, 'Claude',
             () => reviserRole({ spec: vision, files, issues: review.issues }));
         files = mergeFiles(files, rev.files);
-        await writeProjectFiles(projectDir, rev.files);
+        await writeProjectFiles(root, rev.files, log);
         log(`[reviser-r${round}] revised ${rev.files.length} files`);
     }
+
+    // Persist a manifest of every file the construction phase touched, separating
+    // creations from modifications. This is the user-facing "what changed" summary
+    // — the actual code is in the project root, reviewable via `git diff`.
+    const changesManifest = {
+        projectRoot: root,
+        mode: scan.hasCode ? 'modify-in-place' : 'greenfield',
+        existingFilesScanned: scan.files.length,
+        created: files.filter((f) => f.mode === 'create').map((f) => f.path).sort(),
+        modified: files.filter((f) => f.mode === 'modify').map((f) => f.path).sort(),
+    };
+    await writeJson(path.join(dirs.construction, 'changes.json'), changesManifest);
     log('[phase] 3/4 construction complete');
 
     // ==================== Phase 4: Transition ====================
@@ -238,6 +289,10 @@ async function runArchitect({
         cumulativeUsd,
         verdict: designReview.verdict,
         fileCount: files.length,
+        createdCount: changesManifest.created.length,
+        modifiedCount: changesManifest.modified.length,
+        mode: changesManifest.mode,
+        projectRoot: root,
         roundsRun: usageLog.filter((u) => u.role.startsWith('critic-r')).length,
         remainingBlocking,
     });
@@ -250,28 +305,37 @@ async function runArchitect({
         elapsedSec: Number(elapsedSec),
         totalUsd: cumulativeUsd,
         verdict: designReview.verdict,
+        projectRoot: root,
+        mode: changesManifest.mode,
         fileCount: files.length,
+        created: changesManifest.created,
+        modified: changesManifest.modified,
         remainingBlockingIssues: remainingBlocking,
         roles: usageLog,
     });
 
-    log(`[done] $${cumulativeUsd.toFixed(4)} in ${elapsedSec}s — ${baseDir}`);
+    log(`[done] $${cumulativeUsd.toFixed(4)} in ${elapsedSec}s — design: ${baseDir}, code: ${root}`);
 
     return {
         baseDir,
-        projectDir,
+        projectRoot: root,
         files,
+        created: changesManifest.created,
+        modified: changesManifest.modified,
+        mode: changesManifest.mode,
         verdict: designReview.verdict,
         issues: lastIssues,
         usage: { totalUsd: cumulativeUsd, perRole: usageLog },
     };
 }
 
-function renderReadme({ slug, requirement, startedAt, finishedAt, elapsedSec, cumulativeUsd, verdict, fileCount, roundsRun, remainingBlocking }) {
+function renderReadme({ slug, requirement, startedAt, finishedAt, elapsedSec, cumulativeUsd, verdict, fileCount, createdCount, modifiedCount, mode, projectRoot, roundsRun, remainingBlocking }) {
     const reqExcerpt = requirement.length > 400 ? `${requirement.slice(0, 400)}…` : requirement;
     return `# ${slug ?? 'architect output'}
 
 > Generated by p3x-architect — multi-agent RUP pipeline (OpenAI + Claude).
+> The design dossier lives in this folder. The actual code was written / modified
+> directly under the project root: \`${projectRoot}\`. Review it with \`git diff\`.
 
 ## Original requirement
 
@@ -287,12 +351,13 @@ ${reqExcerpt}
 | Finished | ${finishedAt.toISOString()} |
 | Elapsed | ${elapsedSec}s |
 | Total cost | \$${cumulativeUsd.toFixed(4)} |
-| Files generated | ${fileCount} |
+| Mode | **${mode}** |
+| Files touched | ${fileCount} (${createdCount} created, ${modifiedCount} modified) |
 | Critic rounds | ${roundsRun} |
 | Remaining blocking issues | ${remainingBlocking} |
 | Design verdict | **${verdict}** |
 
-## Outputs
+## Outputs (design dossier)
 
 ### Phase 1 — Inception
 - [vision.md](inception/vision.md) — purpose, stakeholders, success criteria, scope, use cases
@@ -301,13 +366,13 @@ ${reqExcerpt}
 ### Phase 2 — Elaboration
 - [requirements.json](elaboration/requirements.json) — structured, prioritized requirements
 - [architecture.md](elaboration/architecture.md) — components, tech choices, data flow
-- [file_tree.json](elaboration/file_tree.json) — every file the project needs
+- [file_tree.json](elaboration/file_tree.json) — every file the architect proposed (with mode: create / modify and change_notes)
 - [risks.md](elaboration/risks.md) — risk register with mitigations
 - [design-review.md](elaboration/design-review.md) — Elaboration sign-off + verdict
 - [design-findings.json](elaboration/design-findings.json) — specific gaps to fix
 
-### Phase 3 — Construction
-- [project/](construction/project/) — the actual generated source code
+### Phase 3 — Construction (writes / edits at the project root, not under here)
+- [changes.json](construction/changes.json) — manifest of created vs. modified files at the project root
 - \`issues-round-N.json\` — critic findings per round
 
 ### Phase 4 — Transition
@@ -316,13 +381,13 @@ ${reqExcerpt}
 
 ## Next steps
 
-1. Open this folder in your IDE and read \`inception/vision.md\` first.
-2. Sanity-check \`elaboration/architecture.md\` matches what you actually want.
-3. Browse \`construction/project/\` — the generated implementation. Use Claude Code on it to refine.
-4. Run the acceptance checklist in \`transition/acceptance.md\` once the code is integrated.
+1. \`git status\` / \`git diff\` at the project root — review every file the construction phase touched.
+2. Read [inception/vision.md](inception/vision.md) to confirm the agents understood the spec.
+3. Sanity-check [elaboration/architecture.md](elaboration/architecture.md) against the diff.
+4. Run the acceptance checklist in [transition/acceptance.md](transition/acceptance.md).
 
 ## Pipeline metadata
 
-See [pipeline.json](pipeline.json) for full per-role token usage and cost breakdown.
+See [pipeline.json](pipeline.json) for full per-role token usage, cost, and the same created/modified manifest.
 `;
 }
