@@ -54,7 +54,12 @@ export async function callOpenAI({ system, user, schema, schemaName, model = pro
     try {
         await writeFile(schemaPath, JSON.stringify(zodToJsonSchema(schema)));
 
-        const prompt = system ? `${system}\n\n---\n\n${user}` : user;
+        // Defensive: strip null bytes from the prompt. spawn() refuses any arg
+        // containing a null byte (ERR_INVALID_ARG_VALUE). Scanning filters most
+        // of these out via isLikelyBinary, but if a binary file slips through
+        // we'd rather drop the byte than kill the whole run.
+        const rawPrompt = system ? `${system}\n\n---\n\n${user}` : user;
+        const prompt = typeof rawPrompt === 'string' ? rawPrompt.replace(/\0/g, '') : rawPrompt;
         const args = [
             'exec',
             '--skip-git-repo-check',

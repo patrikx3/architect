@@ -52,9 +52,15 @@ export async function callAnthropic({ system, user, schema, schemaName, model = 
         '--model', cliModel,
         '--exclude-dynamic-system-prompt-sections',
     ];
-    if (system) args.push('--system-prompt', system);
+    // Defensive: strip null bytes. spawn() refuses any arg containing a null
+    // byte (the `system` prompt is an arg). The `user` text is piped via stdin
+    // so it isn't subject to the same restriction, but we scrub both to keep
+    // behaviour symmetric with the openai provider.
+    const safeSystem = typeof system === 'string' ? system.replace(/\0/g, '') : system;
+    const safeUser = typeof user === 'string' ? user.replace(/\0/g, '') : user;
+    if (safeSystem) args.push('--system-prompt', safeSystem);
 
-    const { stdout } = await spawnAndCollect('claude', args, { input: user });
+    const { stdout } = await spawnAndCollect('claude', args, { input: safeUser });
 
     let envelope;
     try {

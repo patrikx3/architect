@@ -5,6 +5,10 @@
                         
 [//]: #@corifeus-header:end
 
+### v2026.4.114
+Released on 05/11/2026
+* BUGFIX: Improved null-byte safety with full-buffer binary detection and provider-side scrubbing.
+
 ### v2026.4.113
 Released on 05/11/2026
 * FEATURE: Added scout role and shared conventions doc so multiple AIs stay aligned on project conventions.
@@ -120,7 +124,7 @@ All my domains, including [patrikx3.com](https://patrikx3.com), [corifeus.eu](ht
 **🚨 Important Changes:** Any breaking changes are prominently noted in the readme to keep you informed.
 
 
-[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.113
+[**P3X-ARCHITECT**](https://corifeus.com/architect) Build v2026.4.114
 
  [![NPM](https://img.shields.io/npm/v/p3x-architect.svg)](https://www.npmjs.com/package/p3x-architect)  [![Donate for PatrikX3 / P3X](https://img.shields.io/badge/Donate-PatrikX3-003087.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QZVM4V6HVZJW6)  [![Contact Corifeus / P3X](https://img.shields.io/badge/Contact-P3X-ff9900.svg)](https://www.patrikx3.com/en/front/contact) [![Like Corifeus @ Facebook](https://img.shields.io/badge/LIKE-Corifeus-3b5998.svg)](https://www.facebook.com/corifeus.software)
 

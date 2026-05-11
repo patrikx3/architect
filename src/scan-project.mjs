@@ -38,10 +38,14 @@ const DEFAULT_LIMITS = {
     smartPickerPerCluster: 2,
 };
 
+// Detect null bytes anywhere in the buffer — not just the first 1KB. Any file
+// containing a null byte must be excluded from `files`, because the AI provider
+// SDKs pass prompt text through to child processes (codex CLI) where spawn()
+// refuses arguments with null bytes ("The argument must be a string without
+// null bytes"). A single embedded null in a 50KB scanned file kills the whole
+// run. So we err on the side of "if there's a null byte, treat as binary".
 function isLikelyBinary(buffer) {
-    const slice = buffer.subarray(0, 1024);
-    for (let i = 0; i < slice.length; i += 1) if (slice[i] === 0) return true;
-    return false;
+    return buffer.indexOf(0) !== -1;
 }
 
 // Compute "cluster keys" for a path. A path can belong to multiple clusters.
