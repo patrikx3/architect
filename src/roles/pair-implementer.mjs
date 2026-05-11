@@ -25,12 +25,17 @@ You receive:
 You produce: the full final content of every file in the tree.
 
 Rules:
-- Implement EVERY entry in the tree (both "create" and "modify"). Do not skip any.
+- Implement EVERY entry in the tree (both "create" and "modify"), with ONE exception below.
 - For "create" entries: write a complete, runnable file from scratch.
 - For "modify" entries: start from the provided current content and apply ONLY the changes
   described in change_notes plus whatever else the plan requires for this feature.
   Preserve everything unrelated — imports, helpers, formatting, comments, license headers.
   Do NOT rewrite the file in your own style.
+- EXCEPTION — if a "modify" entry has NO current content attached (you'll see an explicit
+  marker saying so), DO NOT INCLUDE IT IN YOUR OUTPUT. Omit that path entirely. The file
+  stays on disk exactly as it is. NEVER write a stub or a "from scratch" replacement for
+  a file you cannot see — that destroys the user's existing translations, lookup tables,
+  large data files, etc.
 - Each returned file's content is the COMPLETE new file (not a patch / diff / partial).
 - Match the existing project's language, framework, indentation, quoting style, and
   conventions. Read the surrounding code before deciding how to write yours.
@@ -52,7 +57,7 @@ function formatTree(fileTree, existingByPath) {
             if (current != null) {
                 lines.push('', 'Current content:', '```', current, '```');
             } else {
-                lines.push('', '_(planner listed mode=modify but no current content was provided — treat as create)_');
+                lines.push('', '⚠️ NO CURRENT CONTENT ATTACHED. Per the rules above, OMIT THIS PATH from your output entirely so the existing file on disk is preserved unchanged. Do NOT write a stub. Do NOT treat as create.');
             }
         }
         return lines.join('\n');

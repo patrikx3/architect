@@ -23,6 +23,48 @@ const { ensureDir, writeFile, readFile, remove, pathExists } = fsExtra;
 
 const isBlocking = (issue) => issue.severity === 'high' || issue.severity === 'medium';
 
+// For every fileTree entry with mode="modify", make sure the implementer receives
+// the CURRENT content of that file. The initial scan-project pass caps total bytes
+// and file count, so on large codebases some "modify" targets are missing from
+// scan.files. Without this, implementers silently treat them as "create" and
+// overwrite the existing file with a stub — see implementer.mjs / pair-implementer.mjs.
+//
+// Returns an extended existingFiles array (existing entries unchanged + any missing
+// "modify" files re-read from disk). Skips entries that fail safety checks or whose
+// file doesn't exist (architect must have meant "create" for those).
+const loadMissingModifyContents = async (projectRoot, fileTree, existingFiles, log) => {
+    const byPath = new Map(existingFiles.map((f) => [f.path, f.content]));
+    const added = [];
+    for (const entry of fileTree) {
+        if (entry.mode !== 'modify') continue;
+        if (byPath.has(entry.path)) continue;
+        let target;
+        try {
+            target = resolveSafe(projectRoot, entry.path);
+        } catch (err) {
+            log?.(`  ! refusing to read unsafe modify path: ${entry.path} (${err.message})`);
+            continue;
+        }
+        if (!(await pathExists(target))) {
+            log?.(`  ! modify target does not exist on disk: ${entry.path} — implementer will be told to skip it`);
+            continue;
+        }
+        let content;
+        try {
+            content = await readFile(target, 'utf8');
+        } catch (err) {
+            log?.(`  ! failed to read modify target ${entry.path}: ${err.message}`);
+            continue;
+        }
+        byPath.set(entry.path, content);
+        added.push({ path: entry.path, content });
+    }
+    if (added.length > 0) {
+        log?.(`[orchestrator] enriched implementer context with ${added.length} modify-target file(s) re-read from disk: ${added.map((a) => a.path).join(', ')}`);
+    }
+    return [...existingFiles, ...added];
+};
+
 // Resolve a tree-relative path against projectRoot, blocking absolute paths and
 // any '..' component so the AI cannot escape projectRoot. Throws on violations.
 const resolveSafe = (projectRoot, relPath) => {
@@ -189,12 +231,13 @@ async function runPairArchitect(opts, log) {
     await writeJson(path.join(baseDir, 'file_tree.json'), fileTree);
 
     // ---- Step 2: pair-implementer (Codex) — write every file from the plan ----
+    const enrichedFilesForImpl = await loadMissingModifyContents(root, fileTree, scan.files, log);
     const impl = await runRole('pair-implementer', 'OpenAI/codex',
         () => pairImplementerRole({
             requirement: requirementText,
             plan,
             fileTree,
-            existingFiles: scan.files,
+            existingFiles: enrichedFilesForImpl,
         }));
     let files = impl.files;
     log(`[pair-implementer] produced ${files.length} files`);
@@ -422,13 +465,14 @@ async function runRupArchitect(opts, log) {
 
     // ==================== Phase 3: Construction ====================
     log(`[phase] 3/4 construction (${arch.fileTree.length} entries — ${createCount} create / ${modifyCount} modify, target=${root})`);
+    const enrichedFilesForImpl = await loadMissingModifyContents(root, arch.fileTree, scan.files, log);
     const impl = await runRole('implementer', 'Claude',
         () => implementerRole({
             spec: vision,
             requirements: reqs.requirements,
             architecture: arch.architecture,
             fileTree: arch.fileTree,
-            existingFiles: scan.files,
+            existingFiles: enrichedFilesForImpl,
         }));
     let files = impl.files;
     await writeProjectFiles(root, files, log);
