@@ -54,10 +54,12 @@ export async function callOpenAI({ system, user, schema, schemaName, model = pro
     try {
         await writeFile(schemaPath, JSON.stringify(zodToJsonSchema(schema)));
 
-        // Defensive: strip null bytes from the prompt. spawn() refuses any arg
-        // containing a null byte (ERR_INVALID_ARG_VALUE). Scanning filters most
-        // of these out via isLikelyBinary, but if a binary file slips through
-        // we'd rather drop the byte than kill the whole run.
+        // Defensive: strip null bytes from the prompt. The codex CLI doc says
+        //   "If not provided as an argument (or if '-' is used), instructions are
+        //    read from stdin."
+        // So we pipe the prompt via stdin to dodge the OS ARG_MAX limit (E2BIG)
+        // when the conventions doc + file contents push the combined prompt past
+        // ~128KB. Null bytes are still scrubbed defensively (just in case).
         const rawPrompt = system ? `${system}\n\n---\n\n${user}` : user;
         const prompt = typeof rawPrompt === 'string' ? rawPrompt.replace(/\0/g, '') : rawPrompt;
         const args = [
@@ -70,9 +72,9 @@ export async function callOpenAI({ system, user, schema, schemaName, model = pro
         if (process.env.CODEX_MODEL) {
             args.push('--model', process.env.CODEX_MODEL);
         }
-        args.push(prompt);
+        args.push('-'); // explicit stdin sentinel
 
-        await spawnAndCollect('codex', args);
+        await spawnAndCollect('codex', args, { input: prompt });
 
         const raw = (await readFile(resultPath, 'utf8')).trim();
         let parsed;
