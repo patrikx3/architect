@@ -7,11 +7,32 @@ import { subLog } from './log-context.mjs';
 
 const { writeFile, readFile, remove, ensureDir } = fsExtra;
 
+// Per-call subprocess timeout. Without this, a stuck codex call can run for
+// hours (no internal cap in the CLI either). 15 min is enough for a heavy
+// implementer / scout pass, short enough that a hang doesn't burn the day.
+const SUBPROCESS_TIMEOUT_MS = Number(process.env.ARCHITECT_SUBPROCESS_TIMEOUT_MS ?? 15 * 60 * 1000);
+
 function spawnAndCollect(cmd, args, { input, env } = {}) {
     return new Promise((resolve, reject) => {
         const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], env: env ?? process.env });
         let stdout = '';
         let stderr = '';
+        let settled = false;
+        const settle = (fn) => (val) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            fn(val);
+        };
+        const timer = SUBPROCESS_TIMEOUT_MS > 0
+            ? setTimeout(() => {
+                if (settled) return;
+                subLog(`  ↳ codex: ⏱ timeout after ${SUBPROCESS_TIMEOUT_MS / 1000}s — killing subprocess`);
+                child.kill('SIGTERM');
+                setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5000);
+                settle(reject)(new Error(`${cmd} timed out after ${SUBPROCESS_TIMEOUT_MS / 1000}s`));
+            }, SUBPROCESS_TIMEOUT_MS)
+            : null;
         // codex exec's structured result is captured via --output-last-message file,
         // so stdout here is the live agent transcript (thinking, tool calls). Forward
         // every line of stdout AND stderr to the active log channel so the user sees
@@ -26,14 +47,15 @@ function spawnAndCollect(cmd, args, { input, env } = {}) {
             stderr += s;
             subLog(`  ↳ codex: ${s}`);
         });
-        child.on('error', reject);
+        child.on('error', settle(reject));
         child.on('close', (code) => {
+            if (settled) return;
             if (code !== 0) {
                 const msg = stderr.trim() || stdout.trim() || `${cmd} exited ${code}`;
-                reject(new Error(`${cmd} exited ${code}: ${msg.slice(0, 1000)}`));
+                settle(reject)(new Error(`${cmd} exited ${code}: ${msg.slice(0, 1000)}`));
                 return;
             }
-            resolve({ stdout, stderr });
+            settle(resolve)({ stdout, stderr });
         });
         if (input != null) child.stdin.write(input);
         child.stdin.end();

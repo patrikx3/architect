@@ -28,14 +28,13 @@ const program = new Command();
 
 program
     .name('p3x-architect')
-    .description('Pair-programming AI (Claude planner + Codex implementer) by default — fast 2-4 calls. Add --rup for the full multi-agent RUP design pipeline. Writes/edits code at the project root in place; design artifacts go under agents/<slug>/.')
+    .description('DESIGN-ONLY dossier generator — two AIs (Claude + Codex) cross-check to produce a RUP design dossier (conventions, vision, requirements, architecture, file_tree, risks, design-findings). NEVER writes code into your project. The dossier lands under agents/<slug>/. Hand it to your implementer (Claude Code, Cursor, you, your team). Default = pair mode (quick design pass). Add --rup for the full 7-role dossier.')
     .argument('[input]', 'path to a Markdown file containing the requirement (or omit to use --text or stdin)')
     .option('-t, --text <requirement>', 'inline requirement text (alternative to a file)')
     .option('-n, --name <slug>', 'feature slug (folder name under agents/) — derived from input filename if omitted')
     .option('-o, --output <dir>', 'override the output directory (default: <cwd>/agents/<slug>)')
-    .option('--rup', 'run the full RUP multi-agent pipeline (vision → requirements → architecture → risks → design review → implement → critic → revise → acceptance → deploy). Default is the fast pair mode.')
-    .option('-r, --max-rounds <n>', 'maximum reviewer↔reviser rounds (default 1 in pair mode, 2 in --rup mode)', (v) => Number(v))
-    .option('-b, --budget <usd>', 'cumulative USD budget; 0 = unlimited', (v) => Number(v), 5)
+    .option('--rup', 'run the full 7-role RUP design dossier (Inception → Elaboration). Default is the fast pair mode.')
+    .option('-b, --budget <usd>', 'cumulative USD budget; 0 = unlimited (CLI subscription mode is $0 anyway)', (v) => Number(v), 5)
     .option('--cwd <dir>', 'project root for the agents/<slug>/ output (defaults to current dir)')
     .action(async (input, opts) => {
         let requirement = opts.text;
@@ -63,8 +62,6 @@ program
         const slug = opts.name ?? (derivedName ? slugify(derivedName) : slugify(requirement.slice(0, 40)));
         const cwd = opts.cwd ?? process.cwd();
         const mode = opts.rup ? 'rup' : 'pair';
-        const defaultRounds = mode === 'rup' ? 2 : 1;
-        const maxRounds = opts.maxRounds ?? defaultRounds;
 
         try {
             const result = await architect({
@@ -73,15 +70,16 @@ program
                 outputDir: opts.output,
                 projectRoot: cwd,
                 mode,
-                maxRounds,
                 budgetUsd: opts.budget,
                 log: (msg) => console.log(msg),
             });
             console.log('');
-            console.log(`✔ done (${result.pipelineMode} mode) — ${result.baseDir}`);
-            if (result.verdict) console.log(`  verdict: ${result.verdict}`);
-            console.log(`  files:   ${result.files.length}`);
-            console.log(`  cost:    $${result.usage.totalUsd.toFixed(4)}`);
+            console.log(`✔ design dossier ready (${result.pipelineMode} mode) — ${result.baseDir}`);
+            if (result.verdict) console.log(`  verdict:    ${result.verdict}`);
+            console.log(`  file_tree:  ${result.fileTree.length} entries`);
+            console.log(`  cost:       $${result.usage.totalUsd.toFixed(4)}`);
+            console.log('');
+            console.log('Next: read the dossier, then implement interactively. p3x-architect does NOT write code.');
         } catch (err) {
             console.error('');
             console.error(`✖ pipeline failed: ${err.message}`);

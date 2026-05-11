@@ -2,22 +2,49 @@ import { spawn } from 'node:child_process';
 import { zodToJsonSchema } from './schema.mjs';
 import { subLog } from './log-context.mjs';
 
+// Default to the 1M-context Opus variant so real codebases (scan + conventions
+// + intermediate artifacts) fit without role-level prompt truncation. The plain
+// 'opus' alias still resolves to the standard 200k variant — only the unspecified
+// case picks 1M. Set ANTHROPIC_MODEL=opus to keep 200k behaviour.
+const DEFAULT_MODEL = 'claude-opus-4-7[1m]';
+
 // Maps Anthropic model IDs (used in CLAUDE.md / .env) to claude CLI --model values.
 // claude CLI accepts aliases ('opus', 'sonnet', 'haiku') or full IDs.
 function resolveModel(model) {
-    if (!model) return 'opus';
+    if (!model) return DEFAULT_MODEL;
     if (/^(opus|sonnet|haiku)$/i.test(model)) return model.toLowerCase();
-    if (model.startsWith('claude-opus')) return 'opus';
-    if (model.startsWith('claude-sonnet')) return 'sonnet';
-    if (model.startsWith('claude-haiku')) return 'haiku';
+    // Pass through full model IDs (incl. context-variant suffixes like [1m]).
+    if (model.startsWith('claude-')) return model;
     return model;
 }
+
+// Per-call subprocess timeout. Without this, a stuck claude/codex call can run
+// for hours (no internal cap in the CLI either). 15 min is enough for a heavy
+// implementer/reviewer with 1M context, but short enough that a hang doesn't
+// burn the user's afternoon.
+const SUBPROCESS_TIMEOUT_MS = Number(process.env.ARCHITECT_SUBPROCESS_TIMEOUT_MS ?? 15 * 60 * 1000);
 
 function spawnAndCollect(cmd, args, { input } = {}) {
     return new Promise((resolve, reject) => {
         const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
         let stdout = '';
         let stderr = '';
+        let settled = false;
+        const settle = (fn) => (val) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            fn(val);
+        };
+        const timer = SUBPROCESS_TIMEOUT_MS > 0
+            ? setTimeout(() => {
+                if (settled) return;
+                subLog(`  ↳ claude: ⏱ timeout after ${SUBPROCESS_TIMEOUT_MS / 1000}s — killing subprocess`);
+                child.kill('SIGTERM');
+                setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5000);
+                settle(reject)(new Error(`${cmd} timed out after ${SUBPROCESS_TIMEOUT_MS / 1000}s`));
+            }, SUBPROCESS_TIMEOUT_MS)
+            : null;
         // stdout is the structured JSON envelope — just capture, don't surface to user.
         child.stdout.on('data', (d) => { stdout += d.toString(); });
         // stderr is claude CLI progress / status — forward each line live to the
@@ -27,21 +54,22 @@ function spawnAndCollect(cmd, args, { input } = {}) {
             stderr += s;
             subLog(`  ↳ claude: ${s}`);
         });
-        child.on('error', reject);
+        child.on('error', settle(reject));
         child.on('close', (code) => {
+            if (settled) return;
             if (code !== 0) {
                 const msg = stderr.trim() || stdout.trim() || `${cmd} exited ${code}`;
-                reject(new Error(`${cmd} exited ${code}: ${msg.slice(0, 1000)}`));
+                settle(reject)(new Error(`${cmd} exited ${code}: ${msg.slice(0, 1000)}`));
                 return;
             }
-            resolve({ stdout, stderr });
+            settle(resolve)({ stdout, stderr });
         });
         if (input != null) child.stdin.write(input);
         child.stdin.end();
     });
 }
 
-export async function callAnthropic({ system, user, schema, schemaName, model = process.env.ANTHROPIC_MODEL || 'opus' }) {
+export async function callAnthropic({ system, user, schema, schemaName, model = process.env.ANTHROPIC_MODEL }) {
     const cliModel = resolveModel(model);
     const jsonSchema = JSON.stringify(zodToJsonSchema(schema));
 

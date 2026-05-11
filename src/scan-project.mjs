@@ -27,15 +27,21 @@ const SOURCE_EXT = /\.(js|mjs|cjs|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|c|h|cpp|h
 const WIRING_FILENAME_RX = /^(registry|index|main|app|server|config|bootstrap|module|kernel|application|router|routes|store|state)\.(mjs|cjs|js|ts|tsx|jsx|php|py|rb|go|rs|java|kt|cs)$/i;
 const MANIFEST_RX = /^(package\.json|composer\.json|pyproject\.toml|cargo\.toml|go\.mod|gemfile|build\.gradle|pom\.xml|tsconfig\.json|vite\.config\.(m?js|ts)|webpack\.config\.(m?js|ts)|README\.md|AGENTS\.md|CLAUDE\.md)$/i;
 
+// Conservative defaults so even an Opus 200k-context call has room for the role
+// prompt + conventions doc + intermediate artifacts after the scan is embedded.
+// Earlier defaults (4 MB main + 1 MB smart-picker) dwarfed every model's context
+// on real codebases and forced silent role-level truncation. The smaller budget
+// here keeps the smart-picked exemplars dominant, which is what the scout /
+// architect / pair-planner roles actually rely on.
 const DEFAULT_LIMITS = {
-    maxFileBytes: 200 * 1024,
-    maxTotalBytes: 4 * 1024 * 1024,
-    maxFiles: 400,
+    maxFileBytes: 100 * 1024,
+    maxTotalBytes: 400 * 1024,
+    maxFiles: 200,
     // Smart-picker exemplar budget — separate from the main budget, allocated
     // to ensure each detected file-name cluster has at least one representative
     // in `files`. These are added IN ADDITION to whatever fit in maxTotalBytes.
-    smartPickerMaxBytes: 1 * 1024 * 1024,
-    smartPickerPerCluster: 2,
+    smartPickerMaxBytes: 100 * 1024,
+    smartPickerPerCluster: 1,
 };
 
 // Detect null bytes anywhere in the buffer — not just the first 1KB. Any file

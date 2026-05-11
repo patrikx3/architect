@@ -8,127 +8,20 @@ import requirementsAnalystRole from './roles/requirements-analyst.mjs';
 import architectRole from './roles/architect.mjs';
 import riskAnalystRole from './roles/risk-analyst.mjs';
 import designReviewerRole from './roles/design-reviewer.mjs';
-import implementerRole from './roles/implementer.mjs';
-import criticRole from './roles/critic.mjs';
-import reviserRole from './roles/reviser.mjs';
-import acceptanceWriterRole from './roles/acceptance-writer.mjs';
-import deploymentWriterRole from './roles/deployment-writer.mjs';
 import pairPlannerRole from './roles/pair-planner.mjs';
-import pairImplementerRole from './roles/pair-implementer.mjs';
-import pairReviewerRole from './roles/pair-reviewer.mjs';
-import pairReviserRole from './roles/pair-reviser.mjs';
 import { logStore, subLogFlush } from './providers/log-context.mjs';
 import { scanProject } from './scan-project.mjs';
 
 const { ensureDir, writeFile, readFile, remove, pathExists } = fsExtra;
 
-const isBlocking = (issue) => issue.severity === 'high' || issue.severity === 'medium';
-
-// For every fileTree entry with mode="modify", make sure the implementer receives
-// the CURRENT content of that file. The initial scan-project pass caps total bytes
-// and file count, so on large codebases some "modify" targets are missing from
-// scan.files. Without this, implementers silently treat them as "create" and
-// overwrite the existing file with a stub — see implementer.mjs / pair-implementer.mjs.
-//
-// Returns an extended existingFiles array (existing entries unchanged + any missing
-// "modify" files re-read from disk). Skips entries that fail safety checks or whose
-// file doesn't exist (architect must have meant "create" for those).
-const loadMissingModifyContents = async (projectRoot, fileTree, existingFiles, log) => {
-    const byPath = new Map(existingFiles.map((f) => [f.path, f.content]));
-    const added = [];
-    for (const entry of fileTree) {
-        if (entry.mode !== 'modify') continue;
-        if (byPath.has(entry.path)) continue;
-        let target;
-        try {
-            target = resolveSafe(projectRoot, entry.path);
-        } catch (err) {
-            log?.(`  ! refusing to read unsafe modify path: ${entry.path} (${err.message})`);
-            continue;
-        }
-        if (!(await pathExists(target))) {
-            log?.(`  ! modify target does not exist on disk: ${entry.path} — implementer will be told to skip it`);
-            continue;
-        }
-        let content;
-        try {
-            content = await readFile(target, 'utf8');
-        } catch (err) {
-            log?.(`  ! failed to read modify target ${entry.path}: ${err.message}`);
-            continue;
-        }
-        byPath.set(entry.path, content);
-        added.push({ path: entry.path, content });
-    }
-    if (added.length > 0) {
-        log?.(`[orchestrator] enriched implementer context with ${added.length} modify-target file(s) re-read from disk: ${added.map((a) => a.path).join(', ')}`);
-    }
-    return [...existingFiles, ...added];
-};
-
-// Resolve a tree-relative path against projectRoot, blocking absolute paths and
-// any '..' component so the AI cannot escape projectRoot. Throws on violations.
-const resolveSafe = (projectRoot, relPath) => {
-    if (!relPath || typeof relPath !== 'string') {
-        throw new Error(`bad file path from role: ${relPath}`);
-    }
-    if (path.isAbsolute(relPath)) {
-        throw new Error(`refusing absolute path from role: ${relPath}`);
-    }
-    const normalized = path.normalize(relPath);
-    if (normalized.split(/[\\/]/).includes('..')) {
-        throw new Error(`refusing path that escapes project root: ${relPath}`);
-    }
-    return path.join(projectRoot, normalized);
-};
-
-// Refuse writes where a "modify" target would shrink dramatically — that's how
-// the implementer historically nuked things like registry.mjs (93 → 36 lines)
-// and large lang files (1983 → 36 lines), replacing real content with stubs.
-// Allow up to 50% shrink for files larger than 500 bytes (so small files are
-// unaffected by this guard). The skipped file stays on disk untouched.
-const MODIFY_SHRINK_MIN_RATIO = 0.5;
-const MODIFY_SHRINK_MIN_EXISTING_BYTES = 500;
-
-const writeProjectFiles = async (projectRoot, files, log) => {
-    let blocked = 0;
-    for (const file of files) {
-        const target = resolveSafe(projectRoot, file.path);
-        if (file.mode === 'modify' && (await pathExists(target))) {
-            try {
-                const existing = await readFile(target, 'utf8');
-                const existingBytes = Buffer.byteLength(existing, 'utf8');
-                const newBytes = Buffer.byteLength(file.content ?? '', 'utf8');
-                if (
-                    existingBytes >= MODIFY_SHRINK_MIN_EXISTING_BYTES &&
-                    newBytes < existingBytes * MODIFY_SHRINK_MIN_RATIO
-                ) {
-                    blocked += 1;
-                    log?.(`  ⛔ REFUSED modify (size shrink guard): ${file.path} — existing=${existingBytes}B, new=${newBytes}B (<${Math.round(MODIFY_SHRINK_MIN_RATIO * 100)}%). File left unchanged on disk.`);
-                    continue;
-                }
-            } catch (err) {
-                log?.(`  ! could not stat existing file ${file.path}: ${err.message} — allowing write`);
-            }
-        }
-        await ensureDir(path.dirname(target));
-        await writeFile(target, file.content);
-        log?.(`  ↳ wrote ${file.mode === 'modify' ? 'modify' : 'create'}: ${file.path}`);
-    }
-    if (blocked > 0) {
-        log?.(`  ⚠️  ${blocked} modify write(s) blocked by size-shrink guard — the implementer attempted to replace existing files with much smaller stubs. Their disk state is preserved.`);
-    }
-};
-
-const mergeFiles = (current, updated) => {
-    const map = new Map(current.map((f) => [f.path, f]));
-    for (const file of updated) {
-        map.set(file.path, file);
-    }
-    return Array.from(map.values());
-};
-
 const writeJson = (filePath, value) => writeFile(filePath, JSON.stringify(value, null, 2));
+
+// p3x-architect is a DESIGN-ONLY tool. The two AIs (Claude + Codex) cross-check
+// each other's work across the RUP phases (or a fast pair-mode pre-flight) to
+// produce a written dossier — vision, requirements, architecture, file_tree,
+// risks, design-findings — that the human + their implementer (Claude Code,
+// Cursor, you, your team) then work from. The orchestrator NEVER writes code
+// into the project root. It only writes design artifacts under agents/<slug>/.
 
 export async function architect(opts) {
     const log = opts.log ?? (() => {});
@@ -146,8 +39,8 @@ export async function architect(opts) {
     });
 }
 
-// Default is "pair" (Claude implements + Codex critiques, optional Claude revise).
-// Opt into "rup" by passing { mode: 'rup' } or { rup: true }.
+// Default is "pair" (quick design pass: scout + plan). Opt into the full RUP
+// dossier by passing { mode: 'rup' } or { rup: true }.
 function resolveMode(opts) {
     if (opts.mode === 'rup' || opts.mode === 'pair') return opts.mode;
     if (opts.rup === true) return 'rup';
@@ -190,9 +83,9 @@ async function setupRun({
         log(`[scan] top file-name clusters: ${top}${scan.clusters.length > 8 ? ', …' : ''}`);
     }
     if (scan.hasCode) {
-        log('[scan] mode: modify-in-place — roles will see existing code and only change what the feature needs');
+        log('[scan] mode: modify-existing — design dossier will describe edits against the current layout');
     } else {
-        log('[scan] mode: greenfield — roles will create a new project at the root');
+        log('[scan] mode: greenfield — design dossier will describe a fresh project layout');
     }
 
     const startedAt = new Date();
@@ -230,31 +123,25 @@ async function setupRun({
 }
 
 // ==============================================================
-// PAIR mode (default) — 1 task, 2 AIs, fixed role split:
-//   Claude  = architect / planner / reviewer / risk checker  (NEVER writes file content)
-//   Codex   = implementer / refactor / test writer            (NEVER plans architecture)
-//   Human   = final architect + approval authority
-// Pipeline:
-//   1. pair-planner    (Claude) → plan + file_tree (no content)
-//   2. pair-implementer (Codex) → full content for every file in the tree
-//   3. pair-reviewer   (Claude) → issues list
-//   4. pair-reviser    (Codex)  → revised files (only if blocking issues + rounds left)
+// PAIR mode (default) — quick design pass, 2 AIs:
+//   Codex (scout)       — discovers project conventions (existing codebases only)
+//   Claude (pair-planner) — drafts plan + file_tree referencing those conventions
+// Output: plan.md + file_tree.json (+ conventions.md when there's existing code).
+// No code is written. The human / Claude Code implements against the plan.
 // ==============================================================
 
 async function runPairArchitect(opts, log) {
     const {
         slug,
-        maxRounds = 1,
         budgetUsd = 5,
     } = opts;
 
     const setup = await setupRun({ ...opts, budgetUsd }, log);
     const { requirementText, root, baseDir, scan, startedAt, runRole, usageLog } = setup;
 
-    log(`[pipeline] start (pair mode) — slug=${slug ?? '(none)'}, output=${baseDir}`);
+    log(`[pipeline] start (pair mode — design only) — slug=${slug ?? '(none)'}, output=${baseDir}`);
 
-    // ---- Step 0: scout (Codex) — discover project conventions before any other role ----
-    // Skipped on greenfield (no conventions to discover).
+    // ---- Step 0: scout (Codex) — discover project conventions ----
     let conventions = '';
     if (scan.hasCode) {
         const scoutResult = await runRole('scout', 'OpenAI/codex',
@@ -283,60 +170,10 @@ async function runPairArchitect(opts, log) {
     await writeFile(path.join(baseDir, 'plan.md'), plan);
     await writeJson(path.join(baseDir, 'file_tree.json'), fileTree);
 
-    // ---- Step 2: pair-implementer (Codex) — write every file from the plan ----
-    const enrichedFilesForImpl = await loadMissingModifyContents(root, fileTree, scan.files, log);
-    const impl = await runRole('pair-implementer', 'OpenAI/codex',
-        () => pairImplementerRole({
-            requirement: requirementText,
-            plan,
-            fileTree,
-            existingFiles: enrichedFilesForImpl,
-            conventions,
-        }));
-    let files = impl.files;
-    log(`[pair-implementer] produced ${files.length} files`);
-    await writeProjectFiles(root, files, log);
-
-    // ---- Step 3..N: pair-reviewer (Claude) ↔ pair-reviser (Codex) ----
-    let lastIssues = [];
-    for (let round = 1; round <= maxRounds; round += 1) {
-        const review = await runRole(`pair-reviewer-r${round}`, 'Claude',
-            () => pairReviewerRole({ requirement: requirementText, plan, files, conventions }));
-        lastIssues = review.issues;
-        await writeJson(path.join(baseDir, `issues-round-${round}.json`), review.issues);
-
-        const blocking = review.issues.filter(isBlocking);
-        log(`[pair-reviewer-r${round}] ${review.issues.length} issues, ${blocking.length} blocking`);
-
-        if (blocking.length === 0) {
-            log(`[pair-reviewer-r${round}] no blocking issues — stopping review loop`);
-            break;
-        }
-        if (round >= maxRounds) {
-            log(`[pair-reviewer-r${round}] max rounds reached, ${blocking.length} blocking issues remain`);
-            break;
-        }
-
-        const rev = await runRole(`pair-reviser-r${round}`, 'OpenAI/codex',
-            () => pairReviserRole({ requirement: requirementText, plan, files, issues: review.issues, conventions }));
-        files = mergeFiles(files, rev.files);
-        await writeProjectFiles(root, rev.files, log);
-        log(`[pair-reviser-r${round}] revised ${rev.files.length} files`);
-    }
-
-    const changesManifest = {
-        projectRoot: root,
-        mode: scan.hasCode ? 'modify-in-place' : 'greenfield',
-        existingFilesScanned: scan.files.length,
-        created: files.filter((f) => f.mode === 'create').map((f) => f.path).sort(),
-        modified: files.filter((f) => f.mode === 'modify').map((f) => f.path).sort(),
-    };
-    await writeJson(path.join(baseDir, 'changes.json'), changesManifest);
-
     const finishedAt = new Date();
     const elapsedSec = ((finishedAt - startedAt) / 1000).toFixed(1);
     const cumulativeUsd = setup.getCumulativeUsd();
-    const remainingBlocking = lastIssues.filter(isBlocking).length;
+    const mode = scan.hasCode ? 'modify-existing' : 'greenfield';
 
     const readme = renderPairReadme({
         slug,
@@ -345,13 +182,11 @@ async function runPairArchitect(opts, log) {
         finishedAt,
         elapsedSec,
         cumulativeUsd,
-        fileCount: files.length,
-        createdCount: changesManifest.created.length,
-        modifiedCount: changesManifest.modified.length,
-        mode: changesManifest.mode,
+        fileTreeCount: fileTree.length,
+        planCreate,
+        planModify,
+        mode,
         projectRoot: root,
-        roundsRun: usageLog.filter((u) => u.role.startsWith('pair-reviewer-r')).length,
-        remainingBlocking,
     });
     await writeFile(path.join(baseDir, 'README.md'), readme);
 
@@ -363,37 +198,34 @@ async function runPairArchitect(opts, log) {
         elapsedSec: Number(elapsedSec),
         totalUsd: cumulativeUsd,
         projectRoot: root,
-        mode: changesManifest.mode,
-        fileCount: files.length,
-        created: changesManifest.created,
-        modified: changesManifest.modified,
-        remainingBlockingIssues: remainingBlocking,
+        mode,
+        fileTreeCount: fileTree.length,
+        planCreate,
+        planModify,
         roles: usageLog,
     });
 
-    log(`[done] pair mode — $${cumulativeUsd.toFixed(4)} in ${elapsedSec}s — design: ${baseDir}, code: ${root}`);
+    log(`[done] pair mode — design dossier ready at ${baseDir} — $${cumulativeUsd.toFixed(4)} in ${elapsedSec}s`);
 
     return {
         baseDir,
         projectRoot: root,
-        files,
-        created: changesManifest.created,
-        modified: changesManifest.modified,
-        mode: changesManifest.mode,
-        verdict: remainingBlocking === 0 ? 'ready-to-build' : 'fix-then-build',
-        issues: lastIssues,
+        fileTree,
+        mode,
         pipelineMode: 'pair',
         usage: { totalUsd: cumulativeUsd, perRole: usageLog },
     };
 }
 
-function renderPairReadme({ slug, requirement, startedAt, finishedAt, elapsedSec, cumulativeUsd, fileCount, createdCount, modifiedCount, mode, projectRoot, roundsRun, remainingBlocking }) {
+function renderPairReadme({ slug, requirement, startedAt, finishedAt, elapsedSec, cumulativeUsd, fileTreeCount, planCreate, planModify, mode, projectRoot }) {
     const reqExcerpt = requirement.length > 400 ? `${requirement.slice(0, 400)}…` : requirement;
     return `# ${slug ?? 'architect output'}
 
-> Generated by p3x-architect — **pair mode** (Claude implements + Codex critiques).
-> The actual code was written / modified directly under the project root: \`${projectRoot}\`.
-> Review it with \`git diff\`. For a full RUP design dossier, re-run with \`--rup\`.
+> Generated by p3x-architect — **pair mode** (quick design pass, 2 AIs).
+> This is a **design dossier only**. No code was written into \`${projectRoot}\`.
+> Hand the dossier to your implementer (Claude Code, Cursor, you, your team).
+> For a full RUP dossier (vision, requirements, architecture, risks, findings),
+> re-run with \`--rup\`.
 
 ## Original requirement
 
@@ -405,50 +237,51 @@ ${reqExcerpt}
 
 | Field | Value |
 | --- | --- |
-| Pipeline mode | **pair** (fast, 2-3 calls) |
+| Pipeline mode | **pair** (design-only — fast) |
 | Started | ${startedAt.toISOString()} |
 | Finished | ${finishedAt.toISOString()} |
 | Elapsed | ${elapsedSec}s |
 | Total cost | \$${cumulativeUsd.toFixed(4)} |
-| Mode | **${mode}** |
-| Files touched | ${fileCount} (${createdCount} created, ${modifiedCount} modified) |
-| Critic rounds | ${roundsRun} |
-| Remaining blocking issues | ${remainingBlocking} |
+| Target mode | **${mode}** |
+| File-tree entries | ${fileTreeCount} (${planCreate} create, ${planModify} modify) |
 
-## Role split (1 task / 2 AI workflow)
+## Role split
 
-- **Claude** — architect, planner, reviewer, risk checker. Wrote [plan.md](plan.md) and the issues lists.
-- **Codex** — implementer, refactoring, test writer. Wrote every file under the project root.
-- **You** — final architect + approval authority.
+- **Codex (scout)** — discovers project conventions and emits [conventions.md](conventions.md) (skipped on greenfield).
+- **Claude (pair-planner)** — drafts [plan.md](plan.md) and [file_tree.json](file_tree.json) using those conventions.
+- **You / your implementer** — read the dossier, build the actual code interactively.
 
 ## Outputs
 
 - [plan.md](plan.md) — Claude planner's rationale (greenfield vs modify, layout choices, what each file does)
-- [file_tree.json](file_tree.json) — what Claude planned for Codex to implement
-- [changes.json](changes.json) — manifest of created vs. modified files at the project root
-- \`issues-round-N.json\` — Claude reviewer findings per round (empty file = no issues)
+- [file_tree.json](file_tree.json) — per-file path + purpose + change_notes for the implementer
+- [conventions.md](conventions.md) — scout's project-convention notes (existing codebases only)
 
 ## Next steps
 
-1. \`git status\` / \`git diff\` at the project root — review every file the pair touched.
-2. Read [plan.md](plan.md) to confirm Claude understood the requirement.
-3. If you need a deeper design dossier (vision, requirements, architecture, risks, acceptance, deploy), re-run with \`--rup\`.
+1. Read [plan.md](plan.md) to confirm the planner understood the requirement.
+2. Hand [plan.md](plan.md) + [file_tree.json](file_tree.json) (+ [conventions.md](conventions.md) if present) to your implementer.
+3. Implement interactively. Test. Iterate.
+4. If the change is large enough to warrant vision / requirements / risks / design-findings, re-run with \`--rup\` instead.
 
 ## Pipeline metadata
 
-See [pipeline.json](pipeline.json) for full per-role token usage, cost, and the same created/modified manifest.
+See [pipeline.json](pipeline.json) for per-role token usage and timing.
 `;
 }
 
 // ==============================================================
-// RUP mode (--rup) — full 11-role, 4-phase pipeline. Use this when designing
-// something complex enough to warrant the design dossier.
+// RUP mode (--rup) — full multi-agent design dossier, 7 roles, 2 AIs.
+//   Inception:    scout (Codex), vision (Codex), vision-reviewer (Claude)
+//   Elaboration:  requirements-analyst (Codex), architect (Claude),
+//                 risk-analyst (Codex), design-reviewer (Claude)
+// Output: full dossier under agents/<slug>/{inception,elaboration}/.
+// No code is written. The human / Claude Code implements against the dossier.
 // ==============================================================
 
 async function runRupArchitect(opts, log) {
     const {
         slug,
-        maxRounds = 2,
         budgetUsd = 5,
     } = opts;
 
@@ -458,19 +291,14 @@ async function runRupArchitect(opts, log) {
     const dirs = {
         inception: path.join(baseDir, 'inception'),
         elaboration: path.join(baseDir, 'elaboration'),
-        construction: path.join(baseDir, 'construction'),
-        transition: path.join(baseDir, 'transition'),
     };
     for (const d of Object.values(dirs)) await ensureDir(d);
 
-    log(`[pipeline] start (rup mode) — slug=${slug ?? '(none)'}, output=${baseDir}`);
+    log(`[pipeline] start (rup mode — design dossier) — slug=${slug ?? '(none)'}, output=${baseDir}`);
 
     // ==================== Phase 1: Inception ====================
-    log('[phase] 1/4 inception');
+    log('[phase] 1/2 inception');
 
-    // Scout (Codex) — runs FIRST on existing codebases to discover conventions.
-    // Output is passed to architect, implementer, critic, reviser so they can
-    // match the project's specific shape rather than write generic boilerplate.
     let conventions = '';
     if (scan.hasCode) {
         const scoutResult = await runRole('scout', 'OpenAI/codex',
@@ -493,10 +321,10 @@ async function runRupArchitect(opts, log) {
     const vision = visionFinal.vision;
     await writeFile(path.join(dirs.inception, 'vision.md'), vision);
     await writeFile(path.join(dirs.inception, 'vision-review-notes.md'), visionFinal.notes);
-    log('[phase] 1/4 inception complete');
+    log('[phase] 1/2 inception complete');
 
     // ==================== Phase 2: Elaboration ====================
-    log('[phase] 2/4 elaboration');
+    log('[phase] 2/2 elaboration');
     const reqs = await runRole('requirements-analyst', 'OpenAI/codex',
         () => requirementsAnalystRole({ vision }));
     await writeJson(path.join(dirs.elaboration, 'requirements.json'), reqs.requirements);
@@ -533,94 +361,13 @@ async function runRupArchitect(opts, log) {
     await writeFile(path.join(dirs.elaboration, 'design-review.md'), designReview.review);
     await writeJson(path.join(dirs.elaboration, 'design-findings.json'), designReview.findings);
     log(`[design-reviewer] verdict: ${designReview.verdict}`);
-    log('[phase] 2/4 elaboration complete');
-
-    // ==================== Phase 3: Construction ====================
-    log(`[phase] 3/4 construction (${arch.fileTree.length} entries — ${createCount} create / ${modifyCount} modify, target=${root})`);
-    const enrichedFilesForImpl = await loadMissingModifyContents(root, arch.fileTree, scan.files, log);
-    const impl = await runRole('implementer', 'Claude',
-        () => implementerRole({
-            spec: vision,
-            requirements: reqs.requirements,
-            architecture: arch.architecture,
-            fileTree: arch.fileTree,
-            existingFiles: enrichedFilesForImpl,
-            conventions,
-        }));
-    let files = impl.files;
-    await writeProjectFiles(root, files, log);
-    log(`[implementer] applied ${files.length} files to ${root}`);
-
-    let lastIssues = [];
-    for (let round = 1; round <= maxRounds; round += 1) {
-        const review = await runRole(`critic-r${round}`, 'OpenAI/codex',
-            () => criticRole({
-                spec: vision,
-                requirements: reqs.requirements,
-                architecture: arch.architecture,
-                files,
-                conventions,
-            }));
-        lastIssues = review.issues;
-        await writeJson(
-            path.join(dirs.construction, `issues-round-${round}.json`),
-            review.issues,
-        );
-
-        const blocking = review.issues.filter(isBlocking);
-        log(`[critic-r${round}] ${review.issues.length} issues, ${blocking.length} blocking`);
-
-        if (blocking.length === 0) {
-            log(`[critic-r${round}] no blocking issues — stopping critic loop`);
-            break;
-        }
-        if (round >= maxRounds) {
-            log(`[critic-r${round}] max rounds reached, ${blocking.length} blocking issues remain`);
-            break;
-        }
-
-        const rev = await runRole(`reviser-r${round}`, 'Claude',
-            () => reviserRole({ spec: vision, files, issues: review.issues, conventions }));
-        files = mergeFiles(files, rev.files);
-        await writeProjectFiles(root, rev.files, log);
-        log(`[reviser-r${round}] revised ${rev.files.length} files`);
-    }
-
-    const changesManifest = {
-        projectRoot: root,
-        mode: scan.hasCode ? 'modify-in-place' : 'greenfield',
-        existingFilesScanned: scan.files.length,
-        created: files.filter((f) => f.mode === 'create').map((f) => f.path).sort(),
-        modified: files.filter((f) => f.mode === 'modify').map((f) => f.path).sort(),
-    };
-    await writeJson(path.join(dirs.construction, 'changes.json'), changesManifest);
-    log('[phase] 3/4 construction complete');
-
-    // ==================== Phase 4: Transition ====================
-    log('[phase] 4/4 transition');
-    const acc = await runRole('acceptance-writer', 'OpenAI/codex',
-        () => acceptanceWriterRole({
-            vision,
-            requirements: reqs.requirements,
-            fileTree: arch.fileTree,
-            files,
-        }));
-    await writeFile(path.join(dirs.transition, 'acceptance.md'), acc.acceptance);
-
-    const dep = await runRole('deployment-writer', 'Claude',
-        () => deploymentWriterRole({
-            architecture: arch.architecture,
-            fileTree: arch.fileTree,
-            files,
-        }));
-    await writeFile(path.join(dirs.transition, 'deploy.md'), dep.deploy);
-    log('[phase] 4/4 transition complete');
+    log('[phase] 2/2 elaboration complete');
 
     // ==================== Top-level README ====================
     const finishedAt = new Date();
     const elapsedSec = ((finishedAt - startedAt) / 1000).toFixed(1);
     const cumulativeUsd = setup.getCumulativeUsd();
-    const remainingBlocking = lastIssues.filter(isBlocking).length;
+    const mode = scan.hasCode ? 'modify-existing' : 'greenfield';
     const readme = renderRupReadme({
         slug,
         requirement: requirementText,
@@ -629,13 +376,11 @@ async function runRupArchitect(opts, log) {
         elapsedSec,
         cumulativeUsd,
         verdict: designReview.verdict,
-        fileCount: files.length,
-        createdCount: changesManifest.created.length,
-        modifiedCount: changesManifest.modified.length,
-        mode: changesManifest.mode,
+        fileTreeCount: arch.fileTree.length,
+        createCount,
+        modifyCount,
+        mode,
         projectRoot: root,
-        roundsRun: usageLog.filter((u) => u.role.startsWith('critic-r')).length,
-        remainingBlocking,
     });
     await writeFile(path.join(baseDir, 'README.md'), readme);
 
@@ -648,37 +393,34 @@ async function runRupArchitect(opts, log) {
         totalUsd: cumulativeUsd,
         verdict: designReview.verdict,
         projectRoot: root,
-        mode: changesManifest.mode,
-        fileCount: files.length,
-        created: changesManifest.created,
-        modified: changesManifest.modified,
-        remainingBlockingIssues: remainingBlocking,
+        mode,
+        fileTreeCount: arch.fileTree.length,
+        createCount,
+        modifyCount,
         roles: usageLog,
     });
 
-    log(`[done] rup mode — $${cumulativeUsd.toFixed(4)} in ${elapsedSec}s — design: ${baseDir}, code: ${root}`);
+    log(`[done] rup mode — design dossier ready at ${baseDir} — $${cumulativeUsd.toFixed(4)} in ${elapsedSec}s`);
 
     return {
         baseDir,
         projectRoot: root,
-        files,
-        created: changesManifest.created,
-        modified: changesManifest.modified,
-        mode: changesManifest.mode,
+        fileTree: arch.fileTree,
+        mode,
         verdict: designReview.verdict,
-        issues: lastIssues,
+        findings: designReview.findings,
         pipelineMode: 'rup',
         usage: { totalUsd: cumulativeUsd, perRole: usageLog },
     };
 }
 
-function renderRupReadme({ slug, requirement, startedAt, finishedAt, elapsedSec, cumulativeUsd, verdict, fileCount, createdCount, modifiedCount, mode, projectRoot, roundsRun, remainingBlocking }) {
+function renderRupReadme({ slug, requirement, startedAt, finishedAt, elapsedSec, cumulativeUsd, verdict, fileTreeCount, createCount, modifyCount, mode, projectRoot }) {
     const reqExcerpt = requirement.length > 400 ? `${requirement.slice(0, 400)}…` : requirement;
     return `# ${slug ?? 'architect output'}
 
-> Generated by p3x-architect — **RUP mode** (multi-agent pipeline, OpenAI + Claude).
-> The design dossier lives in this folder. The actual code was written / modified
-> directly under the project root: \`${projectRoot}\`. Review it with \`git diff\`.
+> Generated by p3x-architect — **RUP mode** (full design dossier, 2 AIs cross-checking).
+> This is a **design dossier only**. No code was written into \`${projectRoot}\`.
+> Hand the dossier to your implementer (Claude Code, Cursor, you, your team).
 
 ## Original requirement
 
@@ -690,48 +432,39 @@ ${reqExcerpt}
 
 | Field | Value |
 | --- | --- |
-| Pipeline mode | **rup** (full 4-phase, 11 roles) |
+| Pipeline mode | **rup** (design-only — full dossier, 7 roles) |
 | Started | ${startedAt.toISOString()} |
 | Finished | ${finishedAt.toISOString()} |
 | Elapsed | ${elapsedSec}s |
 | Total cost | \$${cumulativeUsd.toFixed(4)} |
-| Mode | **${mode}** |
-| Files touched | ${fileCount} (${createdCount} created, ${modifiedCount} modified) |
-| Critic rounds | ${roundsRun} |
-| Remaining blocking issues | ${remainingBlocking} |
+| Target mode | **${mode}** |
+| File-tree entries | ${fileTreeCount} (${createCount} create, ${modifyCount} modify) |
 | Design verdict | **${verdict}** |
 
 ## Outputs (design dossier)
 
 ### Phase 1 — Inception
+- [conventions.md](inception/conventions.md) — scout's project-convention notes (existing codebases only)
 - [vision.md](inception/vision.md) — purpose, stakeholders, success criteria, scope, use cases
 - [vision-review-notes.md](inception/vision-review-notes.md) — what the reviewer changed and why
 
 ### Phase 2 — Elaboration
 - [requirements.json](elaboration/requirements.json) — structured, prioritized requirements
 - [architecture.md](elaboration/architecture.md) — components, tech choices, data flow
-- [file_tree.json](elaboration/file_tree.json) — every file the architect proposed (with mode: create / modify and change_notes)
+- [file_tree.json](elaboration/file_tree.json) — every file the architect proposed (mode: create / modify + change_notes)
 - [risks.md](elaboration/risks.md) — risk register with mitigations
 - [design-review.md](elaboration/design-review.md) — Elaboration sign-off + verdict
-- [design-findings.json](elaboration/design-findings.json) — specific gaps to fix
-
-### Phase 3 — Construction (writes / edits at the project root, not under here)
-- [changes.json](construction/changes.json) — manifest of created vs. modified files at the project root
-- \`issues-round-N.json\` — critic findings per round
-
-### Phase 4 — Transition
-- [acceptance.md](transition/acceptance.md) — test scenarios + manual checklist
-- [deploy.md](transition/deploy.md) — local + production deployment + ops
+- [design-findings.json](elaboration/design-findings.json) — specific gaps for the implementer to address
 
 ## Next steps
 
-1. \`git status\` / \`git diff\` at the project root — review every file the construction phase touched.
-2. Read [inception/vision.md](inception/vision.md) to confirm the agents understood the spec.
-3. Sanity-check [elaboration/architecture.md](elaboration/architecture.md) against the diff.
-4. Run the acceptance checklist in [transition/acceptance.md](transition/acceptance.md).
+1. Read [inception/vision.md](inception/vision.md) to confirm the agents understood the spec.
+2. Skim [elaboration/architecture.md](elaboration/architecture.md) + [elaboration/file_tree.json](elaboration/file_tree.json) to confirm the design.
+3. Address every issue in [elaboration/design-findings.json](elaboration/design-findings.json) — they're the reviewer's blocker list.
+4. Hand the dossier to your implementer (Claude Code, Cursor, you, your team). Implement interactively. Test. Iterate.
 
 ## Pipeline metadata
 
-See [pipeline.json](pipeline.json) for full per-role token usage, cost, and the same created/modified manifest.
+See [pipeline.json](pipeline.json) for full per-role token usage + timing.
 `;
 }
