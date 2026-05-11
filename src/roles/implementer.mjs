@@ -14,6 +14,7 @@ const SYSTEM = `You are a senior software engineer. You receive:
 - The original spec
 - A list of structured requirements
 - An architecture description
+- A "Project conventions" document produced by the scout role (existing codebases only) — TREAT THIS AS GOSPEL. The Hard Rules section at the bottom is authoritative; cite it in your decisions.
 - A file_tree of files to TOUCH, each with mode "create" or "modify" and change_notes
 - For every "modify" entry: the FULL current content of that file at the project root
 
@@ -65,9 +66,12 @@ function formatTree(fileTree, existingByPath) {
     }).join('\n\n');
 }
 
-export default async function implementerRole({ spec, requirements, architecture, fileTree, existingFiles = [] }) {
+export default async function implementerRole({ spec, requirements, architecture, fileTree, existingFiles = [], conventions = '' }) {
     const existingByPath = new Map(existingFiles.map((f) => [f.path, f.content]));
-    const user = `# Spec
+    const conventionsBlock = conventions
+        ? `# Project conventions (READ FIRST — these are gospel for this codebase)\n\n${conventions}\n\n---\n\n`
+        : '';
+    const user = `${conventionsBlock}# Spec
 
 ${spec}
 
@@ -83,7 +87,7 @@ ${architecture}
 
 ${formatTree(fileTree, existingByPath)}
 
-Produce the full final content for every file. Return all files in one tool call. Echo each file's mode (create / modify) so downstream tooling knows which were modifications.`;
+Produce the full final content for every file. Return all files in one tool call. Echo each file's mode (create / modify) so downstream tooling knows which were modifications.${conventions ? ' Any file you write that falls into a category covered by the Project conventions section MUST match those conventions exactly — verify against the Hard Rules before emitting each file.' : ''}`;
 
     const result = await callAnthropic({
         system: SYSTEM,

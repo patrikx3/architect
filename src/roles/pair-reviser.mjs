@@ -18,6 +18,8 @@ fixes. You do NOT rewrite the architecture — execute the fix_hints precisely.
 You receive:
 - The original plain-language requirement
 - The plan Claude wrote earlier
+- A "Project conventions" document produced by the scout role — TREAT AS GOSPEL.
+  Use it to fix convention-violation issues correctly.
 - The current state of every file you wrote (path + content + mode)
 - A list of issues from Claude reviewer (severity, file, issue, fix_hint)
 
@@ -35,12 +37,15 @@ Rules:
 - For files originally marked "modify", continue to preserve unrelated existing logic. Do not
   let a review round become an excuse to rewrite the file.`;
 
-export default async function pairReviserRole({ requirement, plan, files, issues }) {
+export default async function pairReviserRole({ requirement, plan, files, issues, conventions = '' }) {
     const fileBlock = files
         .map((f) => `## ${f.path}  (mode: ${f.mode ?? 'create'})\n\n\`\`\`\n${f.content}\n\`\`\``)
         .join('\n\n');
 
-    const user = `# Original requirement
+    const conventionsBlock = conventions
+        ? `# Project conventions (READ FIRST — gospel)\n\n${conventions}\n\n---\n\n`
+        : '';
+    const user = `${conventionsBlock}# Original requirement
 
 ${requirement}
 

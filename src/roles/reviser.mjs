@@ -12,6 +12,9 @@ const Schema = z.object({
 const SYSTEM = `You are a senior software engineer applying review feedback. You receive:
 
 - The original spec
+- A "Project conventions" document produced by the scout role — TREAT AS GOSPEL.
+  Use it to fix convention-violation issues correctly (match the existing shape,
+  not what's plausibly similar).
 - The current state of every file the implementer touched (path + content + mode)
 - A list of issues found by the critic (severity, file, issue, fix_hint)
 
@@ -29,12 +32,15 @@ Rules:
 - For files originally marked "modify", continue to preserve unrelated existing logic. Do not
   let a critic round become an excuse to rewrite the file.`;
 
-export default async function reviserRole({ spec, files, issues }) {
+export default async function reviserRole({ spec, files, issues, conventions = '' }) {
     const fileBlock = files
         .map((f) => `## ${f.path}  (mode: ${f.mode ?? 'create'})\n\n\`\`\`\n${f.content}\n\`\`\``)
         .join('\n\n');
 
-    const user = `# Spec
+    const conventionsBlock = conventions
+        ? `# Project conventions (READ FIRST — these are gospel)\n\n${conventions}\n\n---\n\n`
+        : '';
+    const user = `${conventionsBlock}# Spec
 
 ${spec}
 

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fsExtra from 'fs-extra';
 
+import scoutRole from './roles/scout.mjs';
 import visionRole from './roles/vision.mjs';
 import visionReviewerRole from './roles/vision-reviewer.mjs';
 import requirementsAnalystRole from './roles/requirements-analyst.mjs';
@@ -181,6 +182,13 @@ async function setupRun({
     log(`[scan] reading project root: ${root}`);
     const scan = await scanProject(root);
     log(`[scan] ${scan.files.length} files, ${(scan.totalBytes / 1024).toFixed(1)} KB${scan.truncated ? ' (truncated to fit limits)' : ''}, hasCode=${scan.hasCode}`);
+    if (scan.exemplars?.length) {
+        log(`[scan] smart-picker added ${scan.exemplars.length} convention exemplars: ${scan.exemplars.slice(0, 8).join(', ')}${scan.exemplars.length > 8 ? ', …' : ''}`);
+    }
+    if (scan.clusters?.length) {
+        const top = scan.clusters.slice(0, 8).map((c) => `${c.key}=${c.size}`).join(', ');
+        log(`[scan] top file-name clusters: ${top}${scan.clusters.length > 8 ? ', …' : ''}`);
+    }
     if (scan.hasCode) {
         log('[scan] mode: modify-in-place — roles will see existing code and only change what the feature needs');
     } else {
@@ -245,12 +253,28 @@ async function runPairArchitect(opts, log) {
 
     log(`[pipeline] start (pair mode) — slug=${slug ?? '(none)'}, output=${baseDir}`);
 
+    // ---- Step 0: scout (Codex) — discover project conventions before any other role ----
+    // Skipped on greenfield (no conventions to discover).
+    let conventions = '';
+    if (scan.hasCode) {
+        const scoutResult = await runRole('scout', 'OpenAI/codex',
+            () => scoutRole({
+                requirement: requirementText,
+                existingFiles: scan.files,
+                existingPaths: scan.paths,
+            }));
+        conventions = scoutResult.conventions;
+        await writeFile(path.join(baseDir, 'conventions.md'), conventions);
+        log(`[scout] discovered categories: ${(scoutResult.detectedCategories || []).join(', ') || '(none)'}`);
+    }
+
     // ---- Step 1: pair-planner (Claude) — plan + file_tree, no content ----
     const planResult = await runRole('pair-planner', 'Claude',
         () => pairPlannerRole({
             requirement: requirementText,
             existingFiles: scan.files,
             existingPaths: scan.paths,
+            conventions,
         }));
     const { plan, fileTree } = planResult;
     const planCreate = fileTree.filter((e) => e.mode === 'create').length;
@@ -267,6 +291,7 @@ async function runPairArchitect(opts, log) {
             plan,
             fileTree,
             existingFiles: enrichedFilesForImpl,
+            conventions,
         }));
     let files = impl.files;
     log(`[pair-implementer] produced ${files.length} files`);
@@ -276,7 +301,7 @@ async function runPairArchitect(opts, log) {
     let lastIssues = [];
     for (let round = 1; round <= maxRounds; round += 1) {
         const review = await runRole(`pair-reviewer-r${round}`, 'Claude',
-            () => pairReviewerRole({ requirement: requirementText, plan, files }));
+            () => pairReviewerRole({ requirement: requirementText, plan, files, conventions }));
         lastIssues = review.issues;
         await writeJson(path.join(baseDir, `issues-round-${round}.json`), review.issues);
 
@@ -293,7 +318,7 @@ async function runPairArchitect(opts, log) {
         }
 
         const rev = await runRole(`pair-reviser-r${round}`, 'OpenAI/codex',
-            () => pairReviserRole({ requirement: requirementText, plan, files, issues: review.issues }));
+            () => pairReviserRole({ requirement: requirementText, plan, files, issues: review.issues, conventions }));
         files = mergeFiles(files, rev.files);
         await writeProjectFiles(root, rev.files, log);
         log(`[pair-reviser-r${round}] revised ${rev.files.length} files`);
@@ -442,6 +467,23 @@ async function runRupArchitect(opts, log) {
 
     // ==================== Phase 1: Inception ====================
     log('[phase] 1/4 inception');
+
+    // Scout (Codex) — runs FIRST on existing codebases to discover conventions.
+    // Output is passed to architect, implementer, critic, reviser so they can
+    // match the project's specific shape rather than write generic boilerplate.
+    let conventions = '';
+    if (scan.hasCode) {
+        const scoutResult = await runRole('scout', 'OpenAI/codex',
+            () => scoutRole({
+                requirement: requirementText,
+                existingFiles: scan.files,
+                existingPaths: scan.paths,
+            }));
+        conventions = scoutResult.conventions;
+        await writeFile(path.join(dirs.inception, 'conventions.md'), conventions);
+        log(`[scout] discovered categories: ${(scoutResult.detectedCategories || []).join(', ') || '(none)'}`);
+    }
+
     const visionDraft = await runRole('vision', 'OpenAI/codex',
         () => visionRole({ requirement: requirementText }));
 
@@ -465,6 +507,7 @@ async function runRupArchitect(opts, log) {
             requirements: reqs.requirements,
             existingFiles: scan.files,
             existingPaths: scan.paths,
+            conventions,
         }));
     await writeFile(path.join(dirs.elaboration, 'architecture.md'), arch.architecture);
     await writeJson(path.join(dirs.elaboration, 'file_tree.json'), arch.fileTree);
@@ -502,6 +545,7 @@ async function runRupArchitect(opts, log) {
             architecture: arch.architecture,
             fileTree: arch.fileTree,
             existingFiles: enrichedFilesForImpl,
+            conventions,
         }));
     let files = impl.files;
     await writeProjectFiles(root, files, log);
@@ -515,6 +559,7 @@ async function runRupArchitect(opts, log) {
                 requirements: reqs.requirements,
                 architecture: arch.architecture,
                 files,
+                conventions,
             }));
         lastIssues = review.issues;
         await writeJson(
@@ -535,7 +580,7 @@ async function runRupArchitect(opts, log) {
         }
 
         const rev = await runRole(`reviser-r${round}`, 'Claude',
-            () => reviserRole({ spec: vision, files, issues: review.issues }));
+            () => reviserRole({ spec: vision, files, issues: review.issues, conventions }));
         files = mergeFiles(files, rev.files);
         await writeProjectFiles(root, rev.files, log);
         log(`[reviser-r${round}] revised ${rev.files.length} files`);

@@ -17,6 +17,11 @@ const SYSTEM = `You are a senior software architect running RUP Elaboration.
 You receive:
 - The Inception vision document
 - The structured requirements list
+- A "Project conventions" document produced by the scout role on existing codebases
+  (empty on greenfield) — TREAT AS GOSPEL. The Hard Rules section is authoritative.
+  Conventions tell you where files go and what shape they have; the implementer
+  reads the same conventions doc and will follow it. Your file_tree change_notes
+  should reference convention sections by name when relevant.
 - The COMPLETE list of paths in the existing project (every file under the target root,
   even ones whose content was too large to embed). Use this to understand the full layout.
 - The CONTENT of as many existing source files as fit in your context. May be empty
@@ -110,8 +115,11 @@ function formatExisting(existingFiles) {
     return header + blocks.join('\n\n');
 }
 
-export default async function architectRole({ vision, requirements, existingFiles = [], existingPaths = [] }) {
-    const user = `# Vision
+export default async function architectRole({ vision, requirements, existingFiles = [], existingPaths = [], conventions = '' }) {
+    const conventionsBlock = conventions
+        ? `# Project conventions (READ FIRST — these are gospel for this codebase)\n\n${conventions}\n\n---\n\n`
+        : '';
+    const user = `${conventionsBlock}# Vision
 
 ${vision}
 

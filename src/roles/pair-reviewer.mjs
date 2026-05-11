@@ -20,11 +20,13 @@ a structured issues list.
 You receive:
 - The original plain-language requirement
 - The plan Claude (you, in the planning role) produced earlier
+- A "Project conventions" document produced by the scout role — TREAT AS GOSPEL.
+  Every Hard Rule violation in Codex's output is a HIGH severity issue.
 - Every file Codex produced (path + content + mode "create" or "modify")
 
 You produce a list of concrete, actionable issues. Severity scale:
 
-- high: spec violation, broken code, missing required file from the plan, security flaw, runtime error, regression on a "modify" file (existing functionality silently dropped or rewritten)
+- high: spec violation, broken code, missing required file from the plan, security flaw, runtime error, regression on a "modify" file (existing functionality silently dropped or rewritten), PROJECT-CONVENTION VIOLATION (wrong path, wrong file shape, registry/lang/config replaced rather than extended, hardcoded value that should reference an existing config/registry entry)
 - medium: incorrect behavior on edge cases, weak error handling, mismatched architecture, drift from the plan that needs justification
 - low: style, naming, minor improvements
 
@@ -38,12 +40,15 @@ Rules:
 - Do not invent issues to look thorough. Empty is a valid answer.
 - Do not list cosmetic preferences as high or medium.`;
 
-export default async function pairReviewerRole({ requirement, plan, files }) {
+export default async function pairReviewerRole({ requirement, plan, files, conventions = '' }) {
     const fileBlock = files
         .map((f) => `## ${f.path}  (mode: ${f.mode ?? 'create'})\n\n\`\`\`\n${f.content}\n\`\`\``)
         .join('\n\n');
 
-    const user = `# Original requirement
+    const conventionsBlock = conventions
+        ? `# Project conventions (READ FIRST — gospel; every violation = HIGH severity)\n\n${conventions}\n\n---\n\n`
+        : '';
+    const user = `${conventionsBlock}# Original requirement
 
 ${requirement}
 
@@ -55,7 +60,7 @@ ${plan}
 
 ${fileBlock}
 
-Review the files against the plan and the requirement. Return all issues in one response. Empty array if none.`;
+Review the files against the plan, the requirement, and the Project conventions. Return all issues in one response. Empty array if none.${conventions ? ' Cross-check every file against the Hard Rules section; any violation is high severity.' : ''}`;
 
     const result = await callAnthropic({
         system: SYSTEM,

@@ -19,6 +19,11 @@ write file content — that is Codex's job in the next step. Stick to your role.
 
 You receive:
 - A plain-language requirement
+- A "Project conventions" document produced by the scout role on existing codebases
+  (empty on greenfield) — TREAT AS GOSPEL. The Hard Rules section is authoritative.
+  Use these conventions to decide WHERE new files go (paths) and to make sure
+  your change_notes tell the implementer to match the existing shape (not invent
+  a new one).
 - The COMPLETE list of paths in the existing project (every file under the target root)
 - The CONTENT of as many existing source files as fit in your context. May be empty
   (greenfield) or populated (modify-existing-codebase)
@@ -99,8 +104,11 @@ function formatExisting(existingFiles) {
     return header + blocks.join('\n\n');
 }
 
-export default async function pairPlannerRole({ requirement, existingFiles = [], existingPaths = [] }) {
-    const user = `# Requirement
+export default async function pairPlannerRole({ requirement, existingFiles = [], existingPaths = [], conventions = '' }) {
+    const conventionsBlock = conventions
+        ? `# Project conventions (READ FIRST — these are gospel for this codebase)\n\n${conventions}\n\n---\n\n`
+        : '';
+    const user = `${conventionsBlock}# Requirement
 
 ${requirement}
 
