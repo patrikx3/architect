@@ -36,6 +36,13 @@ Rules:
   stays on disk exactly as it is. NEVER write a stub or a "from scratch" replacement for
   a file you cannot see — that destroys the user's existing translations, lookup tables,
   large data files, etc.
+- HARD RULE — when CURRENT CONTENT IS PROVIDED for a "modify" entry, your output MUST
+  contain the entire existing file plus your changes. The new content must NOT be
+  dramatically shorter than the existing content. Example of catastrophic failure to
+  avoid: existing file is 2000 lines of translations, you output a 30-line file with
+  just the new keys you wanted to add — that DELETES the other 1970 lines. The wrapper
+  process now refuses any "modify" write that shrinks the file by more than 50%, so a
+  stub-replacement will simply be discarded.
 - Each returned file's content is the COMPLETE new file (not a patch / diff / partial).
 - Match the existing project's language, framework, indentation, quoting style, and
   conventions. Read the surrounding code before deciding how to write yours.

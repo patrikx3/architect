@@ -81,12 +81,41 @@ const resolveSafe = (projectRoot, relPath) => {
     return path.join(projectRoot, normalized);
 };
 
+// Refuse writes where a "modify" target would shrink dramatically — that's how
+// the implementer historically nuked things like registry.mjs (93 → 36 lines)
+// and large lang files (1983 → 36 lines), replacing real content with stubs.
+// Allow up to 50% shrink for files larger than 500 bytes (so small files are
+// unaffected by this guard). The skipped file stays on disk untouched.
+const MODIFY_SHRINK_MIN_RATIO = 0.5;
+const MODIFY_SHRINK_MIN_EXISTING_BYTES = 500;
+
 const writeProjectFiles = async (projectRoot, files, log) => {
+    let blocked = 0;
     for (const file of files) {
         const target = resolveSafe(projectRoot, file.path);
+        if (file.mode === 'modify' && (await pathExists(target))) {
+            try {
+                const existing = await readFile(target, 'utf8');
+                const existingBytes = Buffer.byteLength(existing, 'utf8');
+                const newBytes = Buffer.byteLength(file.content ?? '', 'utf8');
+                if (
+                    existingBytes >= MODIFY_SHRINK_MIN_EXISTING_BYTES &&
+                    newBytes < existingBytes * MODIFY_SHRINK_MIN_RATIO
+                ) {
+                    blocked += 1;
+                    log?.(`  ⛔ REFUSED modify (size shrink guard): ${file.path} — existing=${existingBytes}B, new=${newBytes}B (<${Math.round(MODIFY_SHRINK_MIN_RATIO * 100)}%). File left unchanged on disk.`);
+                    continue;
+                }
+            } catch (err) {
+                log?.(`  ! could not stat existing file ${file.path}: ${err.message} — allowing write`);
+            }
+        }
         await ensureDir(path.dirname(target));
         await writeFile(target, file.content);
         log?.(`  ↳ wrote ${file.mode === 'modify' ? 'modify' : 'create'}: ${file.path}`);
+    }
+    if (blocked > 0) {
+        log?.(`  ⚠️  ${blocked} modify write(s) blocked by size-shrink guard — the implementer attempted to replace existing files with much smaller stubs. Their disk state is preserved.`);
     }
 };
 
